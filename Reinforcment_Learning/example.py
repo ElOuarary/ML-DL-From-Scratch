@@ -45,7 +45,10 @@ def play_multiple_episodes(env, n_episodes, n_max_steps, model, loss_fn):
     return all_rewards, all_gradients
 
 def discount_rewards(rewards, discount_factor):
-    pass
+    discounted = np.array(rewards)
+    for step in range(len(rewards) - 2, -1, -1):
+        discounted[step] += discounted[step + 1] * discount_factor
+    return discounted
 
 def discount_and_normalize_rewards(all_rewards, dicount_factor):
     pass
