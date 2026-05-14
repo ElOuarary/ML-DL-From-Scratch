@@ -50,9 +50,13 @@ def discount_rewards(rewards, discount_factor):
         discounted[step] += discounted[step + 1] * discount_factor
     return discounted
 
-def discount_and_normalize_rewards(all_rewards, dicount_factor):
-    pass
-
+def discount_and_normalize_rewards(all_rewards, discount_factor):
+    all_discounted_rewards = [discount_rewards(reward, discount_factor) for reward in all_rewards]
+    flat_rewards = np.concatenate(all_discounted_rewards)
+    mean = flat_rewards.mean()
+    std = flat_rewards.std()
+    return [(discounted_reward - mean) / std for discounted_reward in all_discounted_rewards]
+    
 n_iterations = 150
 n_episode_per_iteration = 10
 n_max_steps = 500
