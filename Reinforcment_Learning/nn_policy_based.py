@@ -9,9 +9,9 @@ obs, info = env.reset()
 def play_one_step(env, obs, model, loss_fn):
     with tf.GradientTape() as tape:
         y_pred = model(obs[np.newaxis])
-        action = np.argmax(y_pred)
-        y_target = tf.zeros(y_pred.shape)
-        y_target[action] = 1
+        action = np.random.choice(len(y_pred[0]), p=y_pred[0].numpy())
+        y_target = np.zeros(y_pred.shape)
+        y_target[0, action] = 1
         loss = loss_fn(y_target, y_pred)
     
     grad = tape.gradient(loss, model.trainable_variables)
@@ -26,6 +26,7 @@ def play_multiple_episodes(env, n_episodes, n_max_steps, model, loss_fn):
         rewards = []
         gradients = []
         for step in range(n_max_steps):
+            print(f"Episode: {episode} _ Step: {step}")
             obs, reward, terminated, truncated, grad = play_one_step(env, obs, model, loss_fn)
             rewards.append(reward)
             gradients.append(grad)
@@ -55,8 +56,7 @@ discount_factor = 0.95
 
 
 model = keras.Sequential([
-    keras.layers.InputLayer(6),
-    keras.layers.Dense(12, activation="relu"),
+    keras.layers.Dense(6, activation="relu"),
     keras.layers.Dense(3, activation="softmax")
 ])
 
@@ -64,6 +64,7 @@ optimizer = keras.optimizers.Nadam(learning_rate=0.01)
 loss_fn = keras.losses.categorical_crossentropy
 
 for iteration in range(n_iterations):
+    print(f"Iteration: {iteration}")
     all_rewards, all_gradients = play_multiple_episodes(env, n_episode_per_iteration, n_max_steps, model, loss_fn)
     all_discounted_normalized_rewards = discount_and_normalize_rewards(all_rewards, discount_factor)
     
@@ -79,13 +80,4 @@ for iteration in range(n_iterations):
         all_mean_grads.append(mean_grad)
     optimizer.apply_gradients(zip(all_mean_grads, model.trainable_variables))
     
-
-while not episode_over:
-    action = env.action_space.sample()
-    obs, reward, terminated, truncated, info = env.step(action)
-    
-    totals += reward
-    episode_over = terminated or truncated
-    
-print(totals)
 env.close()
