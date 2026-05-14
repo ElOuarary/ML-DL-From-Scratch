@@ -6,15 +6,6 @@ import tensorflow as tf
 env = gym.make("Acrobot-v1", render_mode="human")
 obs, info = env.reset()
 
-episode_over = False
-totals = 0
-
-model = keras.Sequential([
-    keras.layers.InputLayer(6),
-    keras.layers.Dense(12, activation="relu"),
-    keras.layers.Dense(3, activation="softmax")
-])
-
 def play_one_step(env, obs, model, loss_fn):
     with tf.GradientTape() as tape:
         y_pred = model(obs[np.newaxis])
@@ -62,8 +53,32 @@ n_episode_per_iteration = 10
 n_max_steps = 500
 discount_factor = 0.95
 
-optimizers = keras.optimizers.Nadam(learning_rate=0.01)
+
+model = keras.Sequential([
+    keras.layers.InputLayer(6),
+    keras.layers.Dense(12, activation="relu"),
+    keras.layers.Dense(3, activation="softmax")
+])
+
+optimizer = keras.optimizers.Nadam(learning_rate=0.01)
 loss_fn = keras.losses.categorical_crossentropy
+
+for iteration in range(n_iterations):
+    all_rewards, all_gradients = play_multiple_episodes(env, n_episode_per_iteration, n_max_steps, model, loss_fn)
+    all_discounted_normalized_rewards = discount_and_normalize_rewards(all_rewards, discount_factor)
+    
+    all_mean_grads = []
+    for var_index in range(len(model.trainable_variables)):
+        mean_grad = tf.reduce_mean(
+            [
+                final_reward * all_gradients[episode_index][step][var_index]
+                for episode_index, final_rewards in enumerate(all_discounted_normalized_rewards)
+                    for step, final_reward in enumerate(final_rewards)
+            ]
+        )
+        all_mean_grads.append(mean_grad)
+    optimizer.apply_gradients(zip(all_mean_grads, model.trainable_variables))
+    
 
 while not episode_over:
     action = env.action_space.sample()
