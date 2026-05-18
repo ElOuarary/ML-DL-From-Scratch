@@ -14,12 +14,25 @@ rewards = [ # shape [s', a, s]
 
 possible_actions = [[0, 1, 2], [0, 2], [1]]
 
+V = np.zeros(3)
+
+gamma = .9
+
+for _ in range(3):
+    V_previous = V.copy()
+    for s in range(3):
+            V[s] = max(
+                sum(transition_probabilities[s][a][sp] * (rewards[s][a][sp] + gamma * V_previous[sp]) for sp in range(3))
+                for a in possible_actions[s]
+            )
+
+print(V)
+
 Q_values = np.full((3,3), np.inf)
 
 for state, actions in enumerate(possible_actions):
     Q_values[state, actions] = 0 # For impossible actions
     
-gamma = .9
 
 for iteration in range(50):
     Q_prev = Q_values.copy()
