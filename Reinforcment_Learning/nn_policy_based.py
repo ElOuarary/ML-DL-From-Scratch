@@ -7,8 +7,9 @@ env = gym.make("Acrobot-v1", render_mode="human")
 obs, info = env.reset()
 
 def play_one_step(env, obs, model, loss_fn):
+    obs_norm = (obs - OBS_MEAN) / (OBS_STD + 1e-8)
     with tf.GradientTape() as tape:
-        y_pred = model(obs[np.newaxis])
+        y_pred = model(obs_norm[np.newaxis])
         action = np.random.choice(len(y_pred[0]), p=y_pred[0].numpy())
         y_target = np.zeros(y_pred.shape)
         y_target[0, action] = 1
@@ -47,21 +48,24 @@ def discount_and_normalize_rewards(all_rewards, discount_factor):
     flat_rewards = np.concatenate(all_discounted_rewards)
     mean = flat_rewards.mean()
     std = flat_rewards.std()
-    return [(discounted_reward - mean) / std for discounted_reward in all_discounted_rewards]
+    return [(discounted_reward - mean) / (std + 1e-8) for discounted_reward in all_discounted_rewards]
     
 n_iterations = 150
-n_episode_per_iteration = 10
+n_episode_per_iteration = 30
 n_max_steps = 500
-discount_factor = 0.95
+discount_factor = 0.99
 
+OBS_MEAN = np.array([0., 0., 0., 0., 0., 0.], dtype=np.float32)
+OBS_STD  = np.array([1., 1., 1., 1., 8., 14.], dtype=np.float32)
 
 model = keras.Sequential([
     keras.layers.Dense(6, activation="relu"),
+    keras.layers.Dense(64, activation=keras.activations.relu),
     keras.layers.Dense(3, activation="softmax")
 ])
 
 optimizer = keras.optimizers.Nadam(learning_rate=0.01)
-loss_fn = keras.losses.categorical_crossentropy
+loss_fn = keras.losses.CategoricalCrossentropy()
 
 for iteration in range(n_iterations):
     print(f"Iteration: {iteration}")
