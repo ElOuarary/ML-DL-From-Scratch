@@ -11,7 +11,7 @@ def run_episode(args):
     model.set_weights(weights)
     loss_fn = keras.losses.CategoricalCrossentropy(from_logits=False)
     
-    env = gym.make("Acrobat-v1")
+    env = gym.make("Acrobot-v1")
     obs, _ = env.reset()
     
     rewards, gradients = [], []
@@ -21,7 +21,7 @@ def run_episode(args):
         obs_t = tf.convert_to_tensor(obs_norm[np.newaxis], dtype=tf.float32)
         
         with tf.GradientTape() as tape:
-            y_predict = model(obs)
+            y_predict = model(obs_t)
             action = np.random.choice(y_predict.shape[1], p=y_predict.numpy()[0])
             y_target = np.zeros(y_predict.shape, dtype=np.float32)
             y_target[0, action] = 1
@@ -36,6 +36,8 @@ def run_episode(args):
         
         if terminated or truncated:
             break
+        
+    return rewards, gradients
 
 def build_model():
     return keras.Sequential([
@@ -43,11 +45,6 @@ def build_model():
         keras.layers.Dense(64, activation=keras.activations.relu),
         keras.layers.Dense(3, activation="softmax")
     ])
-    
-
-
-env = gym.make("Acrobot-v1", render_mode="human")
-obs, info = env.reset()
 
 def play_one_step(env, obs, model, loss_fn):
     obs_norm = (obs - OBS_MEAN) / (OBS_STD + 1e-8)
@@ -132,3 +129,5 @@ if __name__ == "__main__":
         optimizer.apply_gradients(zip(mean_grads, model.trainable_variables))
         mean_ep_reward = np.mean([sum(r) for r in all_rewards])
         print(f"{iteration:3d} mean episode {mean_ep_reward:.1f}")
+    
+    model.save("acrobot_policy.keras")
