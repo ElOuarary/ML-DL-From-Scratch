@@ -28,10 +28,10 @@ for _ in range(3):
 
 print(V)
 
-Q_values = np.full((3,3), np.inf)
+Q_values = np.full((3,3), -np.inf)
 
 for state, actions in enumerate(possible_actions):
-    Q_values[state, actions] = 0 # For impossible actions
+    Q_values[state, actions] = 0 # For possible actions
     
 
 for iteration in range(50):

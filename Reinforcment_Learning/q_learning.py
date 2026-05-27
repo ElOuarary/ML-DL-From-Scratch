@@ -23,9 +23,16 @@ def step(state, action):
 def exploration_policy(state):
     return np.random.choice(possible_actions[state])
 
-alpha0 = 0.05 # learning rate
-decay = 0.005 # learning rate decay 
-gamma = 0.9 # discout factor
+Q_values = np.full((3,3), -np.inf)
+
+for state, actions in enumerate(possible_actions):
+    Q_values[state, actions] = 0 # For possible actions
+    
+print(Q_values)
+
+alpha0 = .05 # learning rate
+decay = .005 # learning rate decay 
+gamma = .9 # discout factor
 state = 0 # initial state
 
 for iteration in range(10_000):
@@ -33,7 +40,8 @@ for iteration in range(10_000):
     next_state, reward = step(state, action)
     next_value = Q_values[next_state].max()
     alpha = 1 / (1+ iteration * decay)
-    Q_values[state, action] *= 1 - alpha
+    Q_values[state, action] *= (1 - alpha)
     Q_values[state, action] += alpha * (reward + gamma * next_value)
     state = next_state
     
+print(Q_values)
