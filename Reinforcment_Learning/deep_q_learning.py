@@ -1,15 +1,16 @@
 from collections import deque
 import gymnasium as gym
+import matplotlib.pyplot as plt
 import numpy as np
 from tensorflow import keras
 import tensorflow as tf
 
 replay_buffer = deque(maxlen=2000)
 
-env = gym.make("Acrobot-v1", render="human")
+env = gym.make("Acrobot-v1", render_mode="human")
 
 input_shape = env.observation_space.shape
-n_outputs = env.action_space.shape
+n_outputs = 3
 
 model = keras.Sequential([
     keras.layers.Dense(32, activation="elu", input_shape=input_shape),
@@ -41,7 +42,7 @@ def play_one_step(env, state, epsilon):
 batch_size = 32
 discount_factor = .95
 optimizer = keras.optimizers.Nadam(learning_rate=1e-2)
-loss_fn = keras.losses.mean_squared_error
+loss_fn = keras.losses.mse
 
 def training_step(batch_size):
     experiences = sample_experiences(batch_size)
@@ -62,12 +63,24 @@ def training_step(batch_size):
     optimizer.apply_gradients(zip(grads, model.trainable_variables))
     
 for episode in range(600):
+    sum_rewards = []
     obs, info = env.reset()
+    all_rewards = 0
     for step in range(500):
+        print(f"Episode: {episode} _ Step: {step}")
         epsilon = max(1 - episode / 500, .01)
-        obs, reward, terminated, truncated, info = play_one_step(env, obs, epsilon)  
+        obs, reward, terminated, truncated, info = play_one_step(env, obs, epsilon)
+        all_rewards += reward  
         if terminated or truncated:
             break
         
+    sum_rewards.append(all_rewards)
+    all_rewards = 0
+        
     if episode > 50:
         training_step(batch_size)
+        
+plt.plot(range(1, 601), sum_rewards)
+plt.show()
+
+model.save("DQL_acrobat_policy.keras") 
