@@ -126,8 +126,8 @@ if __name__ == "__main__":
                 ]
                 mean_grads.append(tf.reduce_mean(weighted, axis=0))
 
-        optimizer.apply_gradients(zip(mean_grads, model.trainable_variables))
-        mean_ep_reward = np.mean([sum(r) for r in all_rewards])
-        print(f"{iteration:3d} mean episode {mean_ep_reward:.1f}")
+            optimizer.apply_gradients(zip(mean_grads, model.trainable_variables))
+            mean_ep_reward = np.mean([sum(r) for r in all_rewards])
+            print(f"{iteration:3d} mean episode {mean_ep_reward:.1f}")
     
     model.save("acrobot_policy.keras")
