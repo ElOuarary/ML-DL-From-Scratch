@@ -59,11 +59,11 @@ transition_probabilities = np.array([ # (s, a, s')
 
 rewards = np.array([
     [np.nan,   -.25,   -.25, np.nan], # s0 reward per action
-    [np.nan,   -.25,      2,   -.25], # s1 - - -
+    [np.nan,   -.25,      1,   -.25], # s1 - - -
     [np.nan,   -.25, np.nan,   -.25], # s2 - - -
     [  -.25,   -.25,   -.25, np.nan], # s3 - - -
     [  -.25,   -.25,   -.25,   -.25], # s4 - - -
-    [     2,   -.25, np.nan,   -.25], # s5 - - -
+    [     1,   -.25, np.nan,   -.25], # s5 - - -
     [  -.25, np.nan,   -.25, np.nan], # s6 - - -
     [  -.25, np.nan,   -.25,   -.25], # s7 - - -
     [  -.25, np.nan, np.nan,   -.25]  # s8 - - -
@@ -93,10 +93,22 @@ GAMMA = .95
 for i in range(1, 101):
     for s in range(9):
         V_MDP[s] = np.max([
-            np.sum(
-                transition_probabilities[s][action][np.argmax(transition_probabilities[s][action])] * (rewards[s][action] + GAMMA * V_MDP[np.argmax(transition_probabilities[s][action])]))
+            np.sum(rewards[s][action] + GAMMA * V_MDP[np.argmax(transition_probabilities[s][action])])
             for action in actions[s]
         ])
-    if i % 10 == 0:
-        print(f"Ieration number: {i}")
-        print(V_MDP.reshape(3, 3))
+
+print(f"Ieration number: {i}")
+print(V_MDP.reshape(3, 3))
+        
+state = np.random.randint(0, 9)
+print(f"Starting State {state} - {positions[state]}")
+
+while state != 2:
+    print(f"Current State {state} - {positions[state]}")
+    best_action = max(
+        actions[state],
+        key=lambda action: np.sum(rewards[state][action] + GAMMA * V_MDP[np.argmax(transition_probabilities[state][action])])
+    )
+    next_state = np.argmax(transition_probabilities[state][best_action])
+    state = next_state
+    print(f"Moving to {positions[next_state]}")
