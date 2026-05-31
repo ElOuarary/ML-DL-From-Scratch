@@ -88,27 +88,54 @@ positions = {
 }
 
 V_MDP = np.zeros(9)
+
+Q_VALUE = np.full((9, 4), -np.inf)
+for state, action in  enumerate(actions):
+    Q_VALUE[state][action] = 0
+
 GAMMA = .95
 
 for i in range(1, 101):
+    V_MDP_prev = V_MDP.copy()
+    Q_VALUE_prev = Q_VALUE.copy()
     for s in range(9):
         V_MDP[s] = np.max([
-            np.sum(rewards[s][action] + GAMMA * V_MDP[np.argmax(transition_probabilities[s][action])])
+            np.sum(rewards[s][action] + GAMMA * V_MDP_prev[np.argmax(transition_probabilities[s][action])])
             for action in actions[s]
         ])
+        
+        for action in actions[s]:
+            Q_VALUE[s][action] = np.sum([
+                transition_probabilities[s][action][next_s] * (rewards[s][action] + GAMMA * Q_VALUE_prev[next_s].max())
+                for next_s in range(9)
+            ])
 
 print(f"Ieration number: {i}")
 print(V_MDP.reshape(3, 3))
+print(Q_VALUE)
         
-state = np.random.randint(0, 9)
+starting_state = np.random.randint(0, 9)
+state = starting_state
 print(f"Starting State {state} - {positions[state]}")
 
+print("The Otpimal State Method".center(50, "="))
 while state != 2:
     print(f"Current State {state} - {positions[state]}")
     best_action = max(
         actions[state],
         key=lambda action: np.sum(rewards[state][action] + GAMMA * V_MDP[np.argmax(transition_probabilities[state][action])])
     )
+    next_state = np.argmax(transition_probabilities[state][best_action])
+    state = next_state
+    print(f"Moving to {positions[next_state]}")
+    
+print()
+
+state = starting_state
+print("The Optimal Q-value Mehtod".center(50, "="))
+while state != 2:
+    print(f"Curretn state {state} - {positions[state]}")
+    best_action = Q_VALUE[state].argmax()
     next_state = np.argmax(transition_probabilities[state][best_action])
     state = next_state
     print(f"Moving to {positions[next_state]}")
