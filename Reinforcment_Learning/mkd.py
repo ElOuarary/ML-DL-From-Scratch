@@ -59,11 +59,11 @@ transition_probabilities = np.array([ # (s, a, s')
 
 rewards = np.array([
     [np.nan,   -.25,   -.25, np.nan], # s0 reward per action
-    [np.nan,   -.25,      5,   -.25], # s1 - - -
+    [np.nan,   -.25,      2,   -.25], # s1 - - -
     [np.nan,   -.25, np.nan,   -.25], # s2 - - -
     [  -.25,   -.25,   -.25, np.nan], # s3 - - -
     [  -.25,   -.25,   -.25,   -.25], # s4 - - -
-    [     5,   -.25, np.nan,   -.25], # s5 - - -
+    [     2,   -.25, np.nan,   -.25], # s5 - - -
     [  -.25, np.nan,   -.25, np.nan], # s6 - - -
     [  -.25, np.nan,   -.25,   -.25], # s7 - - -
     [  -.25, np.nan, np.nan,   -.25]  # s8 - - -
@@ -86,20 +86,17 @@ positions = {
     3: "middle left", 4:       "middle", 5: "middle right",
     6:  "lower left", 7: "lower middle", 8:  "lower right"
 }
-total_reward = 0
-position = np.random.randint(0, 9)
-print(f"Started at position: {position} - {positions[position]}")
 
-while True:
-    action = int(input("Enter your position: "))
-    while action not in actions[position]:
-        action = int(input("Action not allowed: "))
-    total_reward += rewards[position][action]
-    if action == 0 or action == 1: position += 3 * (-1) ** (action+1)
-    else: position += 1 * (-1) ** action
-    print(f"Moved to position: {position} - {positions[position]}")
-    if position == 2:
-        print("You won!")
-        break
-        
-print(f"Score: {total_reward}")
+V_MDP = np.zeros(9)
+GAMMA = .95
+
+for i in range(1, 101):
+    for s in range(9):
+        V_MDP[s] = np.max([
+            np.sum(
+                transition_probabilities[s][action][np.argmax(transition_probabilities[s][action])] * (rewards[s][action] + GAMMA * V_MDP[np.argmax(transition_probabilities[s][action])]))
+            for action in actions[s]
+        ])
+    if i % 10 == 0:
+        print(f"Ieration number: {i}")
+        print(V_MDP.reshape(3, 3))
