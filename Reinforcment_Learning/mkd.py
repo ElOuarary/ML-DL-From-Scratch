@@ -94,6 +94,9 @@ for state, action in  enumerate(actions):
     Q_VALUE[state][action] = 0
 
 TD_V = np.zeros(9)
+TD_Q = np.full((9, 4), -np.inf)
+for state, action in enumerate(actions):
+    TD_Q[state][action] = 0
 
 gamma = .95
 alpha = 0.05
@@ -102,6 +105,7 @@ for i in range(1, 101):
     V_MDP_prev = V_MDP.copy()
     Q_VALUE_prev = Q_VALUE.copy()
     TD_V_prev = TD_V.copy()
+    TD_Q_prev = TD_Q.copy()
     for s in range(9):
         
         V_MDP[s] = np.max([
@@ -118,11 +122,13 @@ for i in range(1, 101):
         random_action = np.random.choice(actions[s])
         next_state = np.argmax(transition_probabilities[s][random_action])    
         TD_V[s] += alpha * (rewards[s][random_action] + gamma * TD_V_prev[next_state] - TD_V_prev[s])
+        TD_Q[s][random_action] += alpha * (rewards[s][random_action] + gamma * TD_Q_prev[next_state].max() - TD_Q_prev[s][random_action])
 
 print(f"Ieration number: {i}")
 print(V_MDP.reshape(3, 3))
 print(Q_VALUE)
-print(TD_V.reshape(3, 3))
+print(TD_V)
+print(TD_Q)
         
 starting_state = np.random.randint(0, 9)
 state = starting_state
