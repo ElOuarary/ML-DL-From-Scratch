@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib.pyplot as plt
 
 transition_probabilities = np.array([ # (s, a, s')
     [
@@ -99,28 +100,34 @@ for state, action in enumerate(actions):
     TD_Q[state][action] = 0
 
 gamma = .95
+decay = 0.005
 alpha = 0.05
 
-for i in range(1, 101):
-    V_MDP_prev = V_MDP.copy()
-    Q_VALUE_prev = Q_VALUE.copy()
+for i in range(0, 10_000):
+    if i >= 100:
+        V_MDP_prev = V_MDP.copy()
+        Q_VALUE_prev = Q_VALUE.copy()
     TD_V_prev = TD_V.copy()
     TD_Q_prev = TD_Q.copy()
     for s in range(9):
         
-        V_MDP[s] = np.max([
-            np.sum(rewards[s][action] + gamma * V_MDP_prev[np.argmax(transition_probabilities[s][action])])
-            for action in actions[s]
-        ])
-        
-        for action in actions[s]:
-            Q_VALUE[s][action] = np.sum([
-                transition_probabilities[s][action][next_s] * (rewards[s][action] + gamma * Q_VALUE_prev[next_s].max())
-                for next_s in range(9)
+        if i >= 100:
+            V_MDP[s] = np.max([
+                np.sum(rewards[s][action] + gamma * V_MDP_prev[np.argmax(transition_probabilities[s][action])])
+                for action in actions[s]
             ])
         
+            for action in actions[s]:
+                Q_VALUE[s][action] = np.sum([
+                    transition_probabilities[s][action][next_s] * (rewards[s][action] + gamma * Q_VALUE_prev[next_s].max())
+                    for next_s in range(9)
+                ])
+        
         random_action = np.random.choice(actions[s])
-        next_state = np.argmax(transition_probabilities[s][random_action])    
+        next_state = np.argmax(transition_probabilities[s][random_action])
+        
+        alpha = alpha / (1 + i * decay)
+            
         TD_V[s] += alpha * (rewards[s][random_action] + gamma * TD_V_prev[next_state] - TD_V_prev[s])
         TD_Q[s][random_action] += alpha * (rewards[s][random_action] + gamma * TD_Q_prev[next_state].max() - TD_Q_prev[s][random_action])
 
@@ -152,6 +159,30 @@ print("The Optimal Q-value Mehtod".center(50, "="))
 while state != 2:
     print(f"Current state {state} - {positions[state]}")
     best_action = Q_VALUE[state].argmax()
+    next_state = np.argmax(transition_probabilities[state][best_action])
+    state = next_state
+    print(f"Moving to {positions[next_state]}")
+
+print()
+    
+state = starting_state
+print("The TD For Optimal State Value".center(50, "="))
+while state != 2:
+    print(f"Current state {state} - {positions[state]}")
+    best_action = max(
+        actions[state],
+        key=lambda action: np.sum(rewards[state][action] + gamma * TD_V[np.argmax(transition_probabilities[state][action])])
+    )
+    state = next_state
+    print(f"Moving to {positions[next_state]}")
+
+print()    
+
+state = starting_state
+print("The TD For Optimal Q-value Mehtod".center(50, "="))
+while state != 2:
+    print(f"Current state {state} - {positions[state]}")
+    best_action = TD_Q[state].argmax()
     next_state = np.argmax(transition_probabilities[state][best_action])
     state = next_state
     print(f"Moving to {positions[next_state]}")
