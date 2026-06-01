@@ -18,6 +18,9 @@ model = keras.Sequential([
     keras.layers.Dense(n_outputs)
 ])
 
+target = keras.models.clone_model(model)
+target.set_weights(model.get_weights())
+
 def epsilon_greedy_policy(state, epsilon=0):
     if np.random.rand() < epsilon:
         return np.random.randint(n_outputs)
@@ -47,7 +50,7 @@ loss_fn = keras.losses.mse
 def training_step(batch_size):
     experiences = sample_experiences(batch_size)
     states, actions, rewards, next_states, terminateds, truncateds = experiences
-    next_Q_values = model.predict(next_states, verbose=False)
+    next_Q_values = target.predict(next_states, verbose=False)
     max_next_Q_values = next_Q_values.max(axis=1)
     runs = 1 - (terminateds | truncateds)
     target_Q_values = rewards + runs * discount_factor * max_next_Q_values
@@ -76,6 +79,9 @@ for episode in range(600):
         
     sum_rewards.append(all_rewards)
     all_rewards = 0
+    
+    if episode % 50 == 0:
+        target.set_weights(model.get_weights())
         
     if episode > 50:
         training_step(batch_size)
