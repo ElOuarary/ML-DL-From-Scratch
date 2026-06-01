@@ -50,8 +50,11 @@ loss_fn = keras.losses.mse
 def training_step(batch_size):
     experiences = sample_experiences(batch_size)
     states, actions, rewards, next_states, terminateds, truncateds = experiences
-    next_Q_values = target.predict(next_states, verbose=False)
-    max_next_Q_values = next_Q_values.max(axis=1)
+    next_Q_values = model.predict(next_states, verbose=False)
+    best_next_actions = next_Q_values.argmax(axis=1)
+    next_mask = tf.one_hot(best_next_actions, n_outputs).numpy()
+    max_next_Q_values = (target.predict(next_states, verbose=0) * next_mask).sum(axis=1)
+    # max_next_Q_values = next_Q_values.max(axis=1)
     runs = 1 - (terminateds | truncateds)
     target_Q_values = rewards + runs * discount_factor * max_next_Q_values
     target_Q_values = target_Q_values.reshape(-1, 1)
