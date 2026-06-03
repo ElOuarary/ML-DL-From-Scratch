@@ -1,5 +1,6 @@
 import gymnasium as gym
 from tensorflow import keras
+from tensorflow.keras import Model
 import tensorflow as tf
 import numpy as np
 
@@ -12,10 +13,17 @@ model = keras.Sequential([
     keras.layers.Dense(17, activation="softmax"),
 ])
 
+input_layer = keras.layers.Input((348,))
+hidden_layer1 = keras.layers.Dense(348 * 3, activation="elu")(input_layer)
+hidden_layer2 = keras.layers.Dense(348 * 2, activation="elu")(hidden_layer1)
+policy_mean_layer = keras.layers.Dense(17, activation="tanh")(hidden_layer2)
+policy_stddev_layer = keras.layers.Dense(17, activation="tanh")(hidden_layer2)
+
+model = Model(inputs=input_layer, outputs=[policy_mean_layer, policy_stddev_layer])
+
 def play_step(env, obs, loss_fn):
     with tf.GradientTape() as tape:
         y_pred = model.predict(obs[np.newaxis])
-        print(y_pred)
         action = np.random.choice(range(len(y_pred[0])), p=y_pred[0])
         y_target = np.zeros(y_pred.shape)
         y_target[0][action] = 1
@@ -70,8 +78,4 @@ def train_model(env, model, iterations, episodes, steps, gamma, loss_fn, optimiz
         optimizer.apply(zip(mean_grads, model.trainable_variables))
 
 if __name__ == "__main__":
-    loss_fn = loss_fn = keras.losses.CategoricalCrossentropy(from_logits=False)
-    optimizer = keras.optimizers.Nadam(learning_rate=0.005)
-    
-    train_model(env, model, 1000, 30, 1000, 0.99, loss_fn, optimizer)
-    env.close()
+    print(model(np.random.random(348)[np.newaxis]))
