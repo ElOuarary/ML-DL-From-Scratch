@@ -1,3 +1,4 @@
+import gymnasium as gym
 import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
@@ -63,4 +64,24 @@ class REINFORCE:
         del self.tape
         self.all_rewards = []
         self.all_log_prob = []
+
+    def store_rewards(self, reward):
+        self.all_rewards.append(reward)
         
+def train():
+    env = gym.make("HumanoidStandup-v5", render=True)
+    agent = REINFORCE(348, 17)
+    for i in range(1, 1_001):
+        for episode in range(30):
+            obs, _ = env.reset()
+            while True:
+                actions = agent.play_step(obs)
+                obs, reward, terminated, truncated, _ = env.step(actions)
+                agent.store_rewards(reward)
+                if terminated or truncated: break
+                
+            agent.update()
+            
+    env.close()
+    
+train()
