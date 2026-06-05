@@ -9,17 +9,16 @@ class PolicyNetwork(Model):
     def __init__(self, obs_space_dim: int, action_space_dim: int):
         super().__init__()
         
-        input_layer = keras.layers.Input((obs_space_dim,))
-        hidden_layer1 = keras.layers.Dense(obs_space_dim * 3, activation="elu")(input_layer)
-        hidden_layer2 = keras.layers.Dense(obs_space_dim * 2, activation="elu")(hidden_layer1)
+        self.hidden_layer1 = keras.layers.Dense(obs_space_dim * 3, activation="elu")
+        self.hidden_layer2 = keras.layers.Dense(obs_space_dim * 2, activation="elu")
+        self.mean_output_layer = keras.layers.Dense(action_space_dim, activation="tanh")
+        self.std_output_layer = keras.layers.Dense(action_space_dim, activation="softplus")
         
-        self.mean_output_layer = keras.layers.Dense(action_space_dim, activation="tanh")(hidden_layer2)
-        self.std_output_layer = keras.layers.Dense(action_space_dim, activation="softplus")(hidden_layer2)
-        
-        self.model = Model(inputs=[input_layer], outputs=[self.mean_output_layer, self.std_output_layer])
         
     def call(self, state):
-        return self.model(state)
+        x = self.hidden_layer1(state)
+        x = self.hidden_layer2(x)
+        return self.mean_output_layer(x), self.std_output_layer(x)
     
 class REINFORCE:
     def __init__(self, obs_space_dim: int, action_space_dim: int):
@@ -62,7 +61,7 @@ class REINFORCE:
         print(f"Loss: {loss}")
         grads = tape.gradient(loss, self.policy.trainable_variables)
         print(grads)
-        self.optimizer.apply(zip(grads, self.policy.trainable_variables))
+        self.optimizer.apply_gradients(zip(grads, self.policy.trainable_variables))
         
         self.all_rewards = []
         self.all_log_prob = []
