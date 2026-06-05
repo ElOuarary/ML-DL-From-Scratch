@@ -14,7 +14,7 @@ class PolicyNetwork(Model):
         hidden_layer2 = keras.layers.Dense(obs_space_dim * 2, activation="elu")(hidden_layer1)
         
         self.mean_output_layer = keras.layers.Dense(action_space_dim, activation="tanh")(hidden_layer2)
-        self.std_output_layer = keras.layers.Dense(action_space_dim, activation="softmax")(hidden_layer2)
+        self.std_output_layer = keras.layers.Dense(action_space_dim, activation="softplus")(hidden_layer2)
         
         self.model = Model(inputs=[input_layer], outputs=[self.mean_output_layer, self.std_output_layer])
         
@@ -23,20 +23,19 @@ class PolicyNetwork(Model):
     
 class REINFORCE:
     def __init__(self, obs_space_dim: int, action_space_dim: int):
-        
-        self.learing_rate = .05
+        self.learning_rate = 5e-3
         self.gamma = .99
         self.policy = PolicyNetwork(obs_space_dim, action_space_dim)
-        self.optimizer = keras.optimizer.Nadam(self.learing_rate)
-        self.tape = tf.GradientTape(persistent=True)
+        self.optimizer = keras.optimizers.Nadam(self.learning_rate)
         
         self.all_rewards = []
         self.all_log_prob = []
     
     def discount_rewards(self, rewards):
+        discounted_rewards = np.zeros_like(rewards)
         for i in range(len(rewards) - 2, -1, -1):
-            rewards[i] = self.gamma * rewards[i+1]
-        return rewards
+            discounted_rewards[i] = rewards[i] + self.gamma * rewards[i+1]
+        return discounted_rewards
     
     def normalize_rewards(self, all_rewards):
         discoutned_rewards = [self.discount_rewards(rewards) for rewards in all_rewards]
@@ -45,23 +44,26 @@ class REINFORCE:
         return (discoutned_rewards - mean) / (std + 1e-8)
     
     def play_step(self, state):
-        mean, std = self.policy(state)
+        mean, std = self.policy(state[np.newaxis])
         distrib = tfp.distributions.Normal(mean, std)
         actions = distrib.sample()
         log_prob = tf.reduce_sum(distrib.log_prob(actions), axis=-1)
         self.all_log_prob.append(log_prob)
-        return actions
+        return actions[0].numpy()
     
-    def update(self):
+    def update(self, tape):
         discounted_rewards = self.discount_rewards(self.all_rewards)
         discounted_rewards_t = tf.constant(discounted_rewards, dtype=tf.float32)
         
         log_probs_t = tf.stack(self.all_log_prob)
+        log_probs_t = tf.where(tf.math.is_nan(log_probs_t), 0, log_probs_t)
+        print(f"Trainable variables: {len(self.policy.trainable_variables)}")
         loss = -tf.reduce_mean(discounted_rewards_t * log_probs_t)
-        grads = self.tape.gradient(loss, self.policy.trainable_variables)
+        print(f"Loss: {loss}")
+        grads = tape.gradient(loss, self.policy.trainable_variables)
+        print(grads)
         self.optimizer.apply(zip(grads, self.policy.trainable_variables))
-        self.tape.__exit__()
-        del self.tape
+        
         self.all_rewards = []
         self.all_log_prob = []
 
@@ -69,19 +71,24 @@ class REINFORCE:
         self.all_rewards.append(reward)
         
 def train():
-    env = gym.make("HumanoidStandup-v5", render=True)
+    env = gym.make("HumanoidStandup-v5", render_mode=None)
     agent = REINFORCE(348, 17)
-    for i in range(1, 1_001):
-        for episode in range(30):
+    for i in range(1, 2):
+        for episode in range(1):
+            print(f"Iteration {i} _ Episode {episode}")
+            rewards = 0
             obs, _ = env.reset()
-            while True:
-                actions = agent.play_step(obs)
-                obs, reward, terminated, truncated, _ = env.step(actions)
-                agent.store_rewards(reward)
-                if terminated or truncated: break
-                
-            agent.update()
+            with tf.GradientTape() as tape:
+                while True:
+                    actions = agent.play_step(obs)
+                    obs, reward, terminated, truncated, _ = env.step(actions)
+                    rewards += reward
+                    agent.store_rewards(reward)
+                    if terminated or truncated: break
+            print(f"Total Rewards: {rewards}") 
+            agent.update(tape)
             
     env.close()
     
-train()
+if __name__ == "__main__":
+    train()

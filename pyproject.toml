@@ -11,4 +11,5 @@ dependencies = [
     "numpy>=2.4.4",
     "tensorflow>=2.21.0",
     "tensorflow-probability>=0.25.0",
+    "tf-keras>=2.21.0",
 ]
