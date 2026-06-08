@@ -26,8 +26,10 @@ class REINFORCE:
         self.gamma = .99
         self.policy = PolicyNetwork(obs_space_dim, action_space_dim)
         self.optimizer = keras.optimizers.Nadam(self.learning_rate)
-        
-        self.all_rewards = []
+        self.means = []
+        self.variance = []
+        self.rewards = []
+        self.actions = []
         self.all_log_prob = []
     
     def discount_rewards(self, rewards):
@@ -42,50 +44,47 @@ class REINFORCE:
         mean, std = flat.mean(), flat.std()
         return (discoutned_rewards - mean) / (std + 1e-8)
     
-    def play_step(self, state):
-        mean, std = self.policy(state[np.newaxis])
-        distrib = tfp.distributions.Normal(mean, std)
+    def play_step(self, env, state):
+        mean, var = self.policy(state[np.newaxis])
+        distrib = tfp.distributions.Normal(mean, var)
         actions = distrib.sample()
-        log_prob = tf.reduce_sum(distrib.log_prob(actions), axis=-1)
-        self.all_log_prob.append(log_prob)
-        return actions[0].numpy()
+        next_state, reward, done, truncated, _ = env.step(actions)
+        self.means.append(mean)
+        self.variance.append(var)
+        self.rewards.append(reward)
+        self.actions.append(actions)
+        return next_state, reward, done, truncated
     
-    def update(self, tape):
-        discounted_rewards = self.discount_rewards(self.all_rewards)
-        discounted_rewards_t = tf.constant(discounted_rewards, dtype=tf.float32)
-        
-        log_probs_t = tf.stack(self.all_log_prob)
-        log_probs_t = tf.where(tf.math.is_nan(log_probs_t), 0, log_probs_t)
-        print(f"Trainable variables: {len(self.policy.trainable_variables)}")
-        loss = -tf.reduce_mean(discounted_rewards_t * log_probs_t)
-        print(f"Loss: {loss}")
+    def update(self):
+        self.rewards = self.discount_rewards(self.rewards)
+        self.means = np.array(self.means)
+        self.variance = np.array(self.variance)
+        self.rewards = np.array(self.rewards)
+        self.actions = np.array(self.actions)
+        with tf.GradientTape() as tape:
+            p1 = - (self.means - self.actions) ** 2 / (2 * self.variance + 1e-8)
+            p2 = tf.math.log(tf.math.sqrt(2 * np.pi * self.variance))
+            log_loss = p1 + p2
+            loss = - tf.reduce_sum(log_loss * self.rewards)
         grads = tape.gradient(loss, self.policy.trainable_variables)
-        print(grads)
         self.optimizer.apply_gradients(zip(grads, self.policy.trainable_variables))
+        self.rewards = []
+        self.means = []
+        self.rewards = []
+        self.actions = []
         
-        self.all_rewards = []
-        self.all_log_prob = []
-
-    def store_rewards(self, reward):
-        self.all_rewards.append(reward)
         
 def train():
-    env = gym.make("HumanoidStandup-v5", render_mode=None)
+    env = gym.make("HumanoidStandup-v5", render_mode="human")
     agent = REINFORCE(348, 17)
     for i in range(1, 2):
         for episode in range(1):
-            print(f"Iteration {i} _ Episode {episode}")
-            rewards = 0
-            obs, _ = env.reset()
-            with tf.GradientTape() as tape:
-                while True:
-                    actions = agent.play_step(obs)
-                    obs, reward, terminated, truncated, _ = env.step(actions)
-                    rewards += reward
-                    agent.store_rewards(reward)
-                    if terminated or truncated: break
-            print(f"Total Rewards: {rewards}") 
-            agent.update(tape)
+            state, _ = env.reset()
+            while True:
+                state, reward, done, truncated = agent.play_step(env, state)
+                if done or truncated:
+                    break
+            agent.update()
             
     env.close()
     

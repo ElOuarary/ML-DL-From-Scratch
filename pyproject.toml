@@ -9,6 +9,7 @@ dependencies = [
     "gymnasium[classic-control,mujoco]>=1.3.0",
     "matplotlib>=3.10.9",
     "numpy>=2.4.4",
+    "pybullet>=3.2.7",
     "tensorflow>=2.21.0",
     "tensorflow-probability>=0.25.0",
     "tf-keras>=2.21.0",
