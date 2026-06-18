@@ -48,7 +48,7 @@ class REINFORCE:
         mean, var = self.policy(state[np.newaxis])
         distrib = tfp.distributions.Normal(mean, var)
         actions = distrib.sample()
-        next_state, reward, done, truncated, _ = env.step(actions)
+        next_state, reward, done, truncated, _ = env.step(actions[0])
         self.means.append(mean)
         self.variance.append(var)
         self.rewards.append(reward)
@@ -64,7 +64,7 @@ class REINFORCE:
         with tf.GradientTape() as tape:
             p1 = - (self.means - self.actions) ** 2 / (2 * self.variance + 1e-8)
             p2 = tf.math.log(tf.math.sqrt(2 * np.pi * self.variance))
-            log_loss = p1 + p2
+            log_loss = tf.reduce_mean(p1 + p2, axis=1)
             loss = - tf.reduce_sum(log_loss * self.rewards)
         grads = tape.gradient(loss, self.policy.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.policy.trainable_variables))
