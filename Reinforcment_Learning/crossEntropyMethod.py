@@ -12,10 +12,13 @@ model = keras.Sequential([
     keras.layers.Dense(3, activation="softmax")
 ])
 
-Episode = namedtuple("Episode", ["steps", "total_reward"])
-EpisodeStep = namedtuple("EpisodeStep", ["observation", "action"])
+model = keras.Sequential([
+    keras.layers.Dense(6),
+    keras.layers.Dense(128, activation="relu"),
+    keras.layers.Dense(3, activation="softmax")
+])
 
-env = gym.make("Acrobot-v1", render="human")
+env = gym.make("Acrobot-v1", render_mode="human")
 
 def generate_batch(env, model, batch_size):
     batch = []
@@ -23,22 +26,22 @@ def generate_batch(env, model, batch_size):
     episode_reward = 0
     obs, _ = env.reset()
     while True:
-        action_probs = model(obs[np.newaxis]).numpy()[0]
-        action = np.random.choice([0, 1, 2], p=action_probs)
-        next_obs, reward, terminated, truncated, _ = env.step(action)
-        episode_reward += reward
-        step = EpisodeStep(obs, action)
-        steps.append(step)
-        obs = next_obs
-        if terminated or truncated:
-            batch.append(Episode(steps, episode_reward))
-            episode_reward = 0
-            steps = []
-            next_obs, _ = env.reset()
-        if len(batch) == batch_size:
-            yield batch
-            batch = []
-        obs = next_obs
+            action_probs = model(obs[np.newaxis]).numpy()[0]
+            action = np.random.choice([0, 1, 2], p=action_probs)
+            next_obs, reward, terminated, truncated, _ = env.step(action)
+            episode_reward += reward
+            step = EpisodeStep(obs, action)
+            steps.append(step)
+            obs = next_obs
+            if terminated or truncated:
+                batch.append(Episode(steps, episode_reward))
+                episode_reward = 0
+                steps = []
+                next_obs, _ = env.reset()
+            if len(batch) == batch_size:
+                yield batch
+                batch = []
+            obs = next_obs
 
 def filter_episode(batch, percentile):
     rewards = list(map(lambda x: x.total_reward, batch))
