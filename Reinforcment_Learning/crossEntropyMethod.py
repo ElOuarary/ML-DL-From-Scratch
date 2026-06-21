@@ -4,19 +4,26 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 from tensorflow import keras
 
+import argparse
 from collections import namedtuple
 
-model = keras.Sequential([
-    keras.layers.Dense(6),
-    keras.layers.Dense(128, activation="relu"),
-    keras.layers.Dense(3, activation="softmax")
-])
+arg_parser = argparse.ArgumentParser()
+arg_parser.add_argument("batch_size", default=32, type=int)
+arg_parser.add_argument("percentile", default=70, type=int)
+
+args = arg_parser.parse_args()
+BATCH_SIZE = args.batch_size
+PERCENTILE = args.percentile
 
 model = keras.Sequential([
     keras.layers.Dense(6),
     keras.layers.Dense(128, activation="relu"),
     keras.layers.Dense(3, activation="softmax")
 ])
+
+
+Episode = namedtuple("Episode", ["steps", "total_reward"])
+EpisodeStep = namedtuple("EpisodeStep", ["observation", "action"])
 
 env = gym.make("Acrobot-v1", render_mode="human")
 
@@ -56,20 +63,27 @@ def filter_episode(batch, percentile):
             train_act.extend(map(lambda x: x.action, steps))
     return train_obs, train_act, rewards_mean, rewards_bounds
 
-BATCH_SIZE = 32
-PERCENTILE = 70
 optimizer = keras.optimizers.Adam(learning_rate=0.005)
 loss_fn = keras.losses.CategoricalCrossentropy()
 
-for i, episodes in enumerate(generate_batch(env, model, BATCH_SIZE)):
-    obs_v, act_v, rewards_mean, rewards_boundary = filter_episode(episodes, PERCENTILE)
-    if obs_v is None:
-        continue
-    y_target = keras.ops.one_hot(act_v, 3)
-    obs_v = np.array(obs_v).reshape(-1, 6)
+@tf.function
+def compute_apply_gradient(model, obs_v, y_target):
     with tf.GradientTape() as tape:
         y_pred = model(obs_v)
         loss = loss_fn(y_target, y_pred)
     grads = tape.gradient(loss, model.trainable_variables)
     optimizer.apply_gradients(zip(grads, model.trainable_variables))
-    print(f"Iteration {i} _ Rewards_Mean {rewards_mean} _ Rewards Boundary {rewards_boundary}")
+    
+try:   
+    for i, episodes in enumerate(generate_batch(env, model, BATCH_SIZE)):
+        obs_v, act_v, rewards_mean, rewards_boundary = filter_episode(episodes, PERCENTILE)
+        if len(obs_v) == 0:
+            continue
+        y_target = keras.ops.one_hot(act_v, 3)
+        obs_v = tf.reshape(tf.Variable(obs_v), (-1, 6))
+        compute_apply_gradient(model, obs_v, y_target)
+        print(f"Iteration {i} _ Rewards_Mean {rewards_mean} _ Rewards Boundary {rewards_boundary}")
+except KeyboardInterrupt as e:
+    print("Stoping experiment")
+else:
+    env.close()
