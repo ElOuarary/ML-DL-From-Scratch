@@ -8,8 +8,8 @@ import argparse
 from collections import namedtuple
 
 arg_parser = argparse.ArgumentParser()
-arg_parser.add_argument("batch_size", default=32, type=int)
-arg_parser.add_argument("percentile", default=70, type=int)
+arg_parser.add_argument("--batch_size", default=32, type=int)
+arg_parser.add_argument("--percentile", default=70, type=int)
 
 args = arg_parser.parse_args()
 BATCH_SIZE = args.batch_size
