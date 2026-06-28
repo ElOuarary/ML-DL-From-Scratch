@@ -66,6 +66,7 @@ def compute_apply_gradient(model, obs_v, y_target):
         loss = loss_fn(y_target, y_pred)
     grads = tape.gradient(loss, model.trainable_variables)
     optimizer.apply_gradients(zip(grads, model.trainable_variables))
+    return loss
     
 def main():
     args = arg_parser.parse_args()
@@ -96,12 +97,13 @@ def main():
                 continue
             y_target = tf.one_hot(act_v, 3)
             obs_v = tf.reshape(tf.Variable(obs_v), (-1, 6))
-            compute_apply_gradient(model, obs_v, y_target)
+            loss = compute_apply_gradient(model, obs_v, y_target)
             
             with train_summary_writer.as_default():
                 tf.summary.scalar("rewards_mean", rewards_mean, step=i)
                 tf.summary.scalar("rewards_boudary", rewards_boundary, step=i)
-            
+                tf.summary.scalar("loss", loss, step=i)
+
             if i >= MAX_ITERATIONS or rewards_mean >= TARGET_REWARDS:
                 break
     except KeyboardInterrupt as e:
