@@ -6,26 +6,17 @@ from tensorflow import keras
 
 import argparse
 from collections import namedtuple
+from datetime import datetime
 
 arg_parser = argparse.ArgumentParser()
 arg_parser.add_argument("--batch_size", default=32, type=int)
 arg_parser.add_argument("--percentile", default=70, type=int)
-
-args = arg_parser.parse_args()
-BATCH_SIZE = args.batch_size
-PERCENTILE = args.percentile
-
-model = keras.Sequential([
-    keras.layers.Dense(6),
-    keras.layers.Dense(128, activation="relu"),
-    keras.layers.Dense(3, activation="softmax")
-])
-
+arg_parser.add_argument("--max_iterations", default=200, type=int)
+arg_parser.add_argument("--target_rewards", default=80, type=int)
+arg_parser.add_argument("--render", default=False, type=bool)
 
 Episode = namedtuple("Episode", ["steps", "total_reward"])
 EpisodeStep = namedtuple("EpisodeStep", ["observation", "action"])
-
-env = gym.make("Acrobot-v1", render_mode="human")
 
 def generate_batch(env, model, batch_size):
     batch = []
@@ -34,7 +25,10 @@ def generate_batch(env, model, batch_size):
     obs, _ = env.reset()
     while True:
             action_probs = model(obs[np.newaxis]).numpy()[0]
-            action = np.random.choice([0, 1, 2], p=action_probs)
+            # Softmax output is in 32 float bit does not sum up always to 1 sometimes less due to rounding
+            # Which affect the np.random.choice that raises ValueError: probailities do not sum to 1
+            probs = action_probs / sum(action_probs)
+            action = np.random.choice([0, 1, 2], p=probs)
             next_obs, reward, terminated, truncated, _ = env.step(action)
             episode_reward += reward
             step = EpisodeStep(obs, action)
@@ -44,11 +38,10 @@ def generate_batch(env, model, batch_size):
                 batch.append(Episode(steps, episode_reward))
                 episode_reward = 0
                 steps = []
-                next_obs, _ = env.reset()
+                obs, _ = env.reset()
             if len(batch) == batch_size:
                 yield batch
                 batch = []
-            obs = next_obs
 
 def filter_episode(batch, percentile):
     rewards = list(map(lambda x: x.total_reward, batch))
@@ -74,16 +67,48 @@ def compute_apply_gradient(model, obs_v, y_target):
     grads = tape.gradient(loss, model.trainable_variables)
     optimizer.apply_gradients(zip(grads, model.trainable_variables))
     
-try:   
-    for i, episodes in enumerate(generate_batch(env, model, BATCH_SIZE)):
-        obs_v, act_v, rewards_mean, rewards_boundary = filter_episode(episodes, PERCENTILE)
-        if len(obs_v) == 0:
-            continue
-        y_target = keras.ops.one_hot(act_v, 3)
-        obs_v = tf.reshape(tf.Variable(obs_v), (-1, 6))
-        compute_apply_gradient(model, obs_v, y_target)
-        print(f"Iteration {i} _ Rewards_Mean {rewards_mean} _ Rewards Boundary {rewards_boundary}")
-except KeyboardInterrupt as e:
-    print("Stoping experiment")
-else:
-    env.close()
+def main():
+    args = arg_parser.parse_args()
+    BATCH_SIZE = args.batch_size
+    PERCENTILE = args.percentile
+    MAX_ITERATIONS = args.max_iterations
+    TARGET_REWARDS = args.target_rewards
+
+    if args.render:
+        env = gym.make("Acrobot-v1", render_mode="human")
+    else:
+        env = gym.make("Acrobot-v1")
+
+    model = keras.Sequential([
+    keras.layers.InputLayer(shape=(6,)),
+    keras.layers.Dense(128, activation="relu"),
+    keras.layers.Dense(3, activation="softmax")
+    ])
+    
+    current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
+    train_log_dir = "logs/crossEntropyMethod/acrobat/" + current_time
+    train_summary_writer = tf.summary.create_file_writer(train_log_dir)
+    
+    try:   
+        for i, episodes in enumerate(generate_batch(env, model, BATCH_SIZE)):
+            obs_v, act_v, rewards_mean, rewards_boundary = filter_episode(episodes, PERCENTILE)
+            if not obs_v:
+                continue
+            y_target = tf.one_hot(act_v, 3)
+            obs_v = tf.reshape(tf.Variable(obs_v), (-1, 6))
+            compute_apply_gradient(model, obs_v, y_target)
+            
+            with train_summary_writer.as_default():
+                tf.summary.scalar("rewards_mean", rewards_mean, step=i)
+                tf.summary.scalar("rewards_boudary", rewards_boundary, step=i)
+            
+            if i >= MAX_ITERATIONS or rewards_mean >= TARGET_REWARDS:
+                break
+    except KeyboardInterrupt as e:
+        print("Stoping experiment")
+    else:
+        env.close()
+        model.save("./Reinforcement_Learing/crossEntrorpyMethod.keras")
+
+if __name__ == "__main__":
+    main()

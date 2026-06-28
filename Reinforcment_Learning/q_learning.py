@@ -42,7 +42,7 @@ class Agent:
     def select_action(self, state):
         best_action, best_value = None, None
         for action in range(4):
-            value_action = self.calc_action_value(state, action)
+            value_action = self.values[(state, action)]
             if best_action is None or best_value < value_action:
                 best_action = action
                 best_value = value_action
@@ -64,12 +64,16 @@ class Agent:
 
     def value_iteration(self):
         for state in range(16):
-            state_values = [
-                self.calc_action_value(state, action)
-                for action in range(4)
-            ]
-            self.values[state] = max(state_values)
-        
+            for action in range(4):
+                action_value = 0
+                target_counts = self.transitions[(state, action)]
+                total = sum(target_counts.values())
+                for target_state, count in target_counts.items():
+                    reward = self.rewards[(state, action)]
+                    best_action = self.select_action(state)
+                    action_value += (count / total) * (reward + GAMMA * self.values[(target_state, best_action)])
+                self.values[(state, action)] = action_value
+                
 if __name__ == "__main__":
     env = gym.make("FrozenLake-v1", render_mode="human", is_slippery=False)
     agent = Agent()
