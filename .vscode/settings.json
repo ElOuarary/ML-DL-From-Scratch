@@ -1,0 +1,7 @@
+{
+    "editor.fontSize": 15,
+    "files.autoSave": "afterDelay",
+    "editor.fontFamily": "'Jet Brains mono'",
+    "editor.wordWrap": "off",
+    "workbench.colorTheme": "Dark+"
+}

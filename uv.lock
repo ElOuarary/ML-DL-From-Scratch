@@ -675,7 +675,6 @@ dependencies = [
     { name = "gymnasium", extra = ["classic-control", "mujoco"] },
     { name = "matplotlib" },
     { name = "numpy" },
-    { name = "pybullet" },
     { name = "tensorflow" },
     { name = "tensorflow-probability" },
     { name = "tf-keras" },
@@ -687,7 +686,6 @@ requires-dist = [
     { name = "gymnasium", extras = ["classic-control", "mujoco"], specifier = ">=1.3.0" },
     { name = "matplotlib", specifier = ">=3.10.9" },
     { name = "numpy", specifier = ">=2.4.4" },
-    { name = "pybullet", specifier = ">=3.2.7" },
     { name = "tensorflow", specifier = ">=2.21.0" },
     { name = "tensorflow-probability", specifier = ">=0.25.0" },
     { name = "tf-keras", specifier = ">=2.21.0" },
@@ -956,12 +954,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/4d/87/cb5e585192a22b8bd457df5a2c16a75ea0db9674c3a0a39fc9347d84e075/protobuf-7.34.1-cp310-abi3-win_amd64.whl", hash = "sha256:e97b55646e6ce5cbb0954a8c28cd39a5869b59090dfaa7df4598a7fba869468c", size = 437901, upload-time = "2026-03-20T17:34:44.112Z" },
     { url = "https://files.pythonhosted.org/packages/88/95/608f665226bca68b736b79e457fded9a2a38c4f4379a4a7614303d9db3bc/protobuf-7.34.1-py3-none-any.whl", hash = "sha256:bb3812cd53aefea2b028ef42bd780f5b96407247f20c6ef7c679807e9d188f11", size = 170715, upload-time = "2026-03-20T17:34:45.384Z" },
 ]
-
-[[package]]
-name = "pybullet"
-version = "3.2.7"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/de/95/b9a98cd4ed948d4f25a7d0b13cb0c1f87e58dc6d113be9e18940641eb25f/pybullet-3.2.7.tar.gz", hash = "sha256:042879db8d101ac7590dee475fc6aded508b85fe1273fdbbfde1d88bd200e14f", size = 80508379, upload-time = "2025-01-30T00:34:00.527Z" }
 
 [[package]]
 name = "pycparser"
