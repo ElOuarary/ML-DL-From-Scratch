@@ -1,6 +1,5 @@
 import gymnasium as gym
 import numpy as np
-import matplotlib.pyplot as plt
 import tensorflow as tf
 from tensorflow import keras
 
@@ -18,13 +17,18 @@ arg_parser.add_argument("--render", default=False, type=bool)
 Episode = namedtuple("Episode", ["steps", "total_reward"])
 EpisodeStep = namedtuple("EpisodeStep", ["observation", "action"])
 
+@tf.function
+def infernece(model, obs_batch):
+    return model(obs_batch)
+
 def generate_batch(env, model, batch_size):
     batch = []
     steps = []
     episode_reward = 0
     obs, _ = env.reset()
+    obs = tf.reshape(tf.constant(obs), (1, -1))
     while True:
-            action_probs = model(obs[np.newaxis]).numpy()[0]
+            action_probs = infernece(model, obs).numpy()[0]
             # Softmax output is in 32 float bit does not sum up always to 1 sometimes less due to rounding
             # Which affect the np.random.choice that raises ValueError: probailities do not sum to 1
             probs = action_probs / sum(action_probs)
@@ -34,11 +38,13 @@ def generate_batch(env, model, batch_size):
             step = EpisodeStep(obs, action)
             steps.append(step)
             obs = next_obs
+            obs = tf.reshape(tf.constant(obs), (1, -1))
             if terminated or truncated:
                 batch.append(Episode(steps, episode_reward))
                 episode_reward = 0
                 steps = []
                 obs, _ = env.reset()
+                obs = tf.reshape(tf.constant(obs), (1, -1))
             if len(batch) == batch_size:
                 yield batch
                 batch = []
@@ -50,19 +56,19 @@ def filter_episode(batch, percentile):
 
     train_obs = []
     train_act = []
-    for steps, reward in batch:
-        if reward > rewards_bounds:
-            train_obs.extend(map(lambda x: x.observation, steps))
-            train_act.extend(map(lambda x: x.action, steps))
-    return train_obs, train_act, rewards_mean, rewards_bounds
+    elite_episode = []
+    for episode in batch:
+        if episode.total_reward > rewards_bounds:
+            train_obs.extend(map(lambda x: x.observation, episode.steps))
+            train_act.extend(map(lambda x: x.action, episode.steps))
+    return train_obs, train_act, rewards_mean, rewards_bounds, elite_episode
 
 optimizer = keras.optimizers.Adam(learning_rate=0.005)
 loss_fn = keras.losses.CategoricalCrossentropy()
 
-@tf.function
 def compute_apply_gradient(model, obs_v, y_target):
     with tf.GradientTape() as tape:
-        y_pred = model(obs_v)
+        y_pred = infernece(model, obs_v)
         loss = loss_fn(y_target, y_pred)
     grads = tape.gradient(loss, model.trainable_variables)
     optimizer.apply_gradients(zip(grads, model.trainable_variables))
@@ -74,6 +80,7 @@ def main():
     PERCENTILE = args.percentile
     MAX_ITERATIONS = args.max_iterations
     TARGET_REWARDS = args.target_rewards
+    elite_episode = []
 
     if args.render:
         env = gym.make("Acrobot-v1", render_mode="human")
@@ -92,13 +99,16 @@ def main():
     
     try:   
         for i, episodes in enumerate(generate_batch(env, model, BATCH_SIZE)):
-            obs_v, act_v, rewards_mean, rewards_boundary = filter_episode(episodes, PERCENTILE)
+            obs_v, act_v, rewards_mean, rewards_boundary, elite_episode = filter_episode(elite_episode + episodes, PERCENTILE)
             if not obs_v:
                 continue
             y_target = tf.one_hot(act_v, 3)
             obs_v = tf.reshape(tf.Variable(obs_v), (-1, 6))
             loss = compute_apply_gradient(model, obs_v, y_target)
-            
+
+            elite_episode.sort()
+            elite_episode = elite_episode[-10:]
+
             with train_summary_writer.as_default():
                 tf.summary.scalar("rewards_mean", rewards_mean, step=i)
                 tf.summary.scalar("rewards_boudary", rewards_boundary, step=i)
@@ -107,10 +117,10 @@ def main():
             if i >= MAX_ITERATIONS or rewards_mean >= TARGET_REWARDS:
                 break
     except KeyboardInterrupt as e:
-        print("Stoping experiment")
+        tf.print("Stoping experiment")
     else:
         env.close()
-        model.save("./Reinforcement_Learing/crossEntrorpyMethod.keras")
+        model.save("./crossEntrorpyMethod.keras")
 
 if __name__ == "__main__":
     main()
