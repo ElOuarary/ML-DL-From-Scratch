@@ -1,93 +1,79 @@
 import gymnasium as gym
-import numpy as np
 
 import argparse
 from collections import defaultdict, Counter
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--gamma", default=0.9, type=float)
-parser.add_argument("--test_episode", default=20, type=int)
+arg_parser = argparse.ArgumentParser()
+arg_parser.add_argument("--iteration-exporation", type=int, default=100)
 
-args = parser.parse_args()
-GAMMA = args.gamma
-TEST_EPISODE = args.test_episode
+GAMMA = 0.9
 
 class Agent:
-    def __init__(self):
-        self.env = gym.make("FrozenLake-v1", render_mode="human", is_slippery=False)
-        self.state, _ = self.env.reset()
-        self.rewards = defaultdict(float)
-        self.transitions = defaultdict(Counter)
-        self.values = defaultdict(float)
-    
-    def play_n_random(self, count):
-        for _ in range(count):
+    def __init__(self, env):
+        self.env = env
+        self.state, _ = env.reset()
+        self.observation_space = 16
+        self.action_space = 4
+
+        self.state_value = defaultdict(float) # (s -> V(s))
+        self.action_value = defaultdict(float) # ((s, a) -> Q(s, a))
+        self.transtitions = defaultdict(Counter) # ((s, a) -> {s'->T(s, a, s')})
+        self.rewards = defaultdict(float) # ((s, a, s') -> R(s, a, s'))
+
+    def explore_env(self, iterations):
+        for _ in range(iterations):
             action = self.env.action_space.sample()
             next_state, reward, terminated, truncated, _ = self.env.step(action)
-            self.rewards[(self.state, action, next_state)] = reward
-            self.transitions[(self.state, action)][next_state] += 1
+            self.transtitions[(self.state, action)][next_state] += 1
+            self.rewards[(self.state, action)] = reward
             if terminated or truncated:
-                self.state, _ = env.reset()
-            else:
-                self.state = next_state
-            
-    def calc_action_value(self, state, action):
-        count = self.transitions[(state, action)]
-        total = sum(count.values())
-        value_action = 0
-        for target_state, count in self.transitions[(state, action)].items():
-            value_action += (count / total) * (self.rewards[(state, action, target_state)] + GAMMA * self.values[target_state])
-        return value_action
-    
-    def select_action(self, state):
-        best_action, best_value = None, None
-        for action in range(4):
-            value_action = self.calc_action_value(state, action)
-            if best_action is None or best_value < value_action:
+                self.state, _ = self.env.reset()
+            self.state= next_state
+
+    def update_values(self):
+        for state in range(self.observation_space):
+            actions_return = []
+            for action in range(self.action_space):
+                total = self.transtitions[(state, action)].total()
+                value = 0
+                for next_state, counter in self.transtitions[(state, action)].items():
+                    value += counter / total * (self.rewards[(state, action, next_state)] + GAMMA * self.state_value[next_state])
+                actions_return.append(value)
+                self.action_value[(state, action)] = value
+            # Is is possible to do one key lookup without the other composite key
+            self.state_value[state] = max(actions_return)
+ 
+    def select_best_action(self, state):
+        best_action, best_reward = None, None
+        for action in range(self.action_space):
+            action_value = self.action_value[(state, action)]
+            if best_reward is None or best_reward < action_value:
+                best_reward = action_value
                 best_action = action
-                best_value = value_action
-        return best_action
-    
-    def play_episode(self, env):
-        state, _ = env.reset()
+        return best_action, best_reward
+
+    def test_policy(self, test_env):
+        obs, _ = test_env.reset()
         total_reward = 0
         while True:
-            action = self.select_action(state)
-            next_state, reward, terminated, truncated, _ = env.step(action)
-            self.rewards[(state, action, next_state)] = reward
-            self.transitions[(state, action)][next_state] += 1
+            best_action, _ = self.select_best_action(obs)
+            next_obs, reward, terminated, truncated, _ = test_env.step(best_action)
             total_reward += reward
             if terminated or truncated:
                 break
-            state = next_state
+            obs = next_obs
+
         return total_reward
 
-    def value_iteration(self):
-        for state in range(16):
-            state_values = [
-                self.calc_action_value(state, action)
-                for action in range(4)
-            ]
-            self.values[state] = max(state_values)
-        
 if __name__ == "__main__":
-    env = gym.make("FrozenLake-v1", render_mode="human", is_slippery=False)
-    agent = Agent()
-    iter_no = 0
-    best_reward = -np.inf
-    while True:
-        iter_no += 1
-        agent.play_n_random(100)
-        agent.value_iteration()
-        
-        reward = 0
-        for _ in range(TEST_EPISODE):
-            reward += agent.play_episode(env)
-        reward /= TEST_EPISODE
-        if reward > best_reward:
-            print(f"Best reward update: {best_reward} -> {reward}")
-            best_reward = reward
-        if reward > 0.8:
-            print(f"Solved {iter_no} in iteration")
-            break
-    env.close()
+    env = gym.make("FrozenLake-v1", is_slippery=False)
+    test_env = gym.make("FrozenLake-v1", is_slippery=False)
+    agent = Agent(env)
+    for j in range(2000):
+        agent.explore_env(100)
+        agent.update_values()
+
+        total_rewards = 0
+        for i in range(20):
+            total_rewards += agent.test_policy(test_env)
+        print("Iteration: ", j, " Mean Rewards: ", total_rewards / 20)
