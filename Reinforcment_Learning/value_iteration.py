@@ -1,6 +1,7 @@
 import gymnasium as gym
 
 import argparse
+from time import sleep
 from collections import defaultdict, Counter
 
 arg_parser = argparse.ArgumentParser()
@@ -25,10 +26,10 @@ class Agent:
             action = self.env.action_space.sample()
             next_state, reward, terminated, truncated, _ = self.env.step(action)
             self.transtitions[(self.state, action)][next_state] += 1
-            self.rewards[(self.state, action)] = reward
+            self.rewards[(self.state, action, next_state)] = reward
+            self.state = next_state
             if terminated or truncated:
                 self.state, _ = self.env.reset()
-            self.state= next_state
 
     def update_values(self):
         for state in range(self.observation_space):
@@ -50,18 +51,23 @@ class Agent:
             if best_reward is None or best_reward < action_value:
                 best_reward = action_value
                 best_action = action
-        return best_action, best_reward
+        return best_action
 
-    def test_policy(self, test_env):
-        obs, _ = test_env.reset()
+    def test_policy(self, test_env, render=False):
+        state, _ = test_env.reset()
         total_reward = 0
         while True:
-            best_action, _ = self.select_best_action(obs)
-            next_obs, reward, terminated, truncated, _ = test_env.step(best_action)
+            best_action = self.select_best_action(state)
+            next_state, reward, terminated, truncated, _ = test_env.step(best_action)
+            self.transtitions[(state, best_action)][next_state] += 1
+            self.rewards[(state, best_action, next_state)]
+            if render:
+                sleep(.7)
             total_reward += reward
             if terminated or truncated:
+                test_env.close()
                 break
-            obs = next_obs
+            state = next_state
 
         return total_reward
 
@@ -69,11 +75,28 @@ if __name__ == "__main__":
     env = gym.make("FrozenLake-v1", is_slippery=False)
     test_env = gym.make("FrozenLake-v1", is_slippery=False)
     agent = Agent(env)
-    for j in range(2000):
+
+    total_rewards = 0
+    best_reward = 0
+    iteration = 0
+    while True:
         agent.explore_env(100)
         agent.update_values()
-
         total_rewards = 0
         for i in range(20):
-            total_rewards += agent.test_policy(test_env)
-        print("Iteration: ", j, " Mean Rewards: ", total_rewards / 20)
+            rewards = agent.test_policy(test_env)
+            if best_reward < rewards:
+                best_reward = rewards
+                print(f"Iteration {iteration} - Test {i}: best reward -> {best_reward}")
+            total_rewards += rewards
+        print("Iteration: ", iteration, " Mean Rewards: ", total_rewards / 20)
+        
+        if total_rewards > 0.8:
+            break
+        total_rewards = 0
+        iteration += 1
+
+    print(f"Q(s,a) : {agent.action_value}\n")
+    print(f"V(s): {agent.state_value}")
+    demo_env = gym.make("FrozenLake-v1", render_mode="human")
+    agent.test_policy(demo_env, render=True)
