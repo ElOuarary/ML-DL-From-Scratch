@@ -13,7 +13,7 @@ class Agent:
     def __init__(self, env):
         self.env = env
         self.state, _ = env.reset()
-        self.observation_space = 16
+        self.observation_space = 64
         self.action_space = 4
 
         self.state_value = defaultdict(float) # (s -> V(s))
@@ -72,8 +72,8 @@ class Agent:
         return total_reward
 
 if __name__ == "__main__":
-    env = gym.make("FrozenLake-v1", is_slippery=False)
-    test_env = gym.make("FrozenLake-v1", is_slippery=False)
+    env = gym.make("FrozenLake-v1", map_name="8x8", is_slippery=False)
+    test_env = gym.make("FrozenLake-v1", map_name="8x8", is_slippery=False)
     agent = Agent(env)
 
     total_rewards = 0
@@ -89,14 +89,13 @@ if __name__ == "__main__":
                 best_reward = rewards
                 print(f"Iteration {iteration} - Test {i}: best reward -> {best_reward}")
             total_rewards += rewards
+        mean_reward = total_rewards / 20
         print("Iteration: ", iteration, " Mean Rewards: ", total_rewards / 20)
         
-        if total_rewards > 0.8:
+        if mean_reward > 0.8:
             break
         total_rewards = 0
         iteration += 1
 
-    print(f"Q(s,a) : {agent.action_value}\n")
-    print(f"V(s): {agent.state_value}")
-    demo_env = gym.make("FrozenLake-v1", render_mode="human")
+    demo_env = gym.make("FrozenLake-v1", map_name="8x8", render_mode="human", is_slippery=False)
     agent.test_policy(demo_env, render=True)
