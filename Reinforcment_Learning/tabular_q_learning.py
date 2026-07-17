@@ -1,70 +1,84 @@
 import gymnasium as gym
+import numpy as np
+
+import pprint
 
 from collections import defaultdict
+from time import sleep
 
+ALPHA = 0.1
 GAMMA = 0.9
-ALPHA = 0.2
-TEST_EPISODES = 20
+TEST_ITERATION = 20
 
 class Agent:
-    def __init__(self):
-        self.env = gym.make("FrozenLake-v1", is_slippery=False)
-        self.state, _ = self.env.reset()
+    def __init__(self, env):
+        self.env = env
+        self.state, _ = env.reset()
+        self.action_space = 4
         self.q_values = defaultdict(float)
-
-    def sample_env(self):
-        action = self.env.action_space.sample()
-        old_state = self.state
-        next_state, reward, terminated, truncated, _ = self.env.step(action)
-        self.state, _ = self.env.reset() if terminated or truncated else next_state, None
-        return old_state, action, reward, next_state
-
-    def best_value_and_action(self, state):
-        best_action, best_value = None, None
-        for action in range(4):
-            q_value = self.q_values[(state, action)]
-            if best_action is None or best_value < q_value:
-                best_action = action
-                best_value = q_value
-        return best_action, best_value
     
-    def update_value(self, state, action, reward, next_state):
-        best_action, _ = self.best_value_and_action(next_state)
-        self.q_values[(state, action)] = (1 - ALPHA) * self.q_values[(state, action)] + ALPHA * (reward + GAMMA * self.q_values[(next_state, best_action)])
+    def explore_env(self, n):
+        for _ in range(n):
+            old_state = self.state
+            action = self.env.action_space.sample()
+            next_state, reward,terminated, truncated, _ = self.env.step(action)
+            self.update_q_values(old_state, action, reward, next_state)
+            if terminated or truncated:
+                self.state, _ = self.env.reset()
+                continue
+            self.state = next_state
 
-    def test_episode(self, env):
+    def update_q_values(self, state, action, reward, next_state):
+        _, future_discouted_reward = self.select_best_action(next_state)
+        self.q_values[(state, action)] = (1 - ALPHA) * self.q_values[(state, action)] + ALPHA * (reward + GAMMA * future_discouted_reward)
+
+    def select_best_action(self, state):
+        best_action, best_reward = None, None
+        for action in range(self.action_space):
+            q_value = self.q_values[(state, action)]
+            if best_reward is None or best_reward < q_value:
+                best_action = action
+                best_reward = q_value
+        return best_action, best_reward
+
+    def test_env(self, env, render=False):
+        state, _  = env.reset()
         total_reward = 0
-        state, _ = env.reset()
         while True:
-            best_action, _ = self.best_value_and_action(state)
+            best_action, _ = self.select_best_action(state)
             next_state, reward, terminated, truncated, _ = env.step(best_action)
+            sleep(0.5)
+            if render:
+                sleep(0.7)
             total_reward += reward
+            state = next_state
             if terminated or truncated:
                 break
-            state = next_state
         return total_reward
-    
+
 if __name__ == "__main__":
-    test_env = gym.make("FrozenLake-v1")
-    agent = Agent()
-    
-    iteration_no = 0
-    best_reward = 0
+    env = gym.make("CliffWalking-v1")
+    test_env = gym.make("CliffWalking-v1")
+    demo_env = gym.make("CliffWalking-v1", render_mode="human")
+    agent = Agent(env)
+
+    i = 1
+    top_reward = 0
     while True:
-        iteration_no += 1
-        state, action, reward, next_state = agent.sample_env()
-        print(state, action, reward, next_state)
-        agent.update_value(state, action, reward, next_state)
-
-        reward = 0
-        for i in range(TEST_EPISODES):
-            reward += agent.test_episode(test_env)
-        reward /= TEST_EPISODES
-
-        if best_reward < reward:
-            print(f"Best Reward Update in iteration {i} -> {reward}")
-        if reward > 0.8:
-            print(f"Solved in iteration {i} with a reward of {reward}")
+        agent.explore_env(10_000)
+        total_rewards = 0
+        for _ in range(20):
+            reward = agent.test_env(test_env)
+            if reward > top_reward:
+                print(f"Updating top reward {top_reward} -> {reward}")
+                top_reward = reward
+                total_rewards += reward
+        mean_reward = total_rewards / 20
+        print(f"Iteration {i} - Mean Reward: {mean_reward}")
+        if mean_reward > -15:
+            print("Problem Solved!")
             break
-    agent.env.close()
-    test_env.close()
+
+        i += 1
+
+    agent.test_env(demo_env, True)
