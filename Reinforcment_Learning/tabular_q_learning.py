@@ -47,7 +47,6 @@ class Agent:
         while True:
             best_action, _ = self.select_best_action(state)
             next_state, reward, terminated, truncated, _ = env.step(best_action)
-            sleep(0.5)
             if render:
                 sleep(0.7)
             total_reward += reward
