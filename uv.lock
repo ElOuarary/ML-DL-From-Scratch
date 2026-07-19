@@ -730,7 +730,7 @@ wheels = [
 [[package]]
 name = "ml-dl-from-scratch"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "arcade" },
     { name = "gymnasium", extra = ["classic-control", "mujoco"] },

@@ -14,3 +14,14 @@ dependencies = [
     "tensorflow-probability>=0.25.0",
     "tf-keras>=2.21.0",
 ]
+
+[project.scripts]
+value_iteration = "Reinforcement_Learning.value_iteration:main"
+tabular_q_learning = "Reinforcement_Learning.tabular_q_learning:main"
+
+[tool.uv]
+package = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["Reinforcement_Learning*"]

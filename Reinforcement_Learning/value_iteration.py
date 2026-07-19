@@ -4,15 +4,13 @@ import argparse
 from time import sleep
 from collections import defaultdict, Counter
 
-GAMMA = 0.9
-
-
 class Agent:
-    def __init__(self, env):
+    def __init__(self, env, gamma):
         self.env = env
         self.state, _ = env.reset()
-        self.observation_space = 64
-        self.action_space = 4
+        self.observation_space = self.env.observation_space.n
+        self.action_space = self.env.action_space.n
+        self.gamma = gamma
 
         self.state_value = defaultdict(float)  # (s -> V(s))
         self.action_value = defaultdict(float)  # ((s, a) -> Q(s, a))
@@ -41,7 +39,7 @@ class Agent:
                         / total
                         * (
                             self.rewards[(state, action, next_state)]
-                            + GAMMA * self.state_value[next_state]
+                            + self.gamma * self.state_value[next_state]
                         )
                     )
                 actions_return.append(value)
@@ -75,20 +73,29 @@ class Agent:
 
         return total_reward
 
-
-if __name__ == "__main__":
+def main():
     arg_parser = argparse.ArgumentParser()
     arg_parser.add_argument("--exploration", type=int, default=100)
+    arg_parser.add_argument("--testing", type=int, default=20)
+    arg_parser.add_argument("--map-name", type=str, default="4x4", choices=("4x4", "8x8"))
+    arg_parser.add_argument("--slippery", type=bool, default=False)
+    arg_parser.add_argument("--render", type=bool, default=False)
+    arg_parser.add_argument("--gamma", type=float, default=0.9)
 
     args = arg_parser.parse_args()
     EXPLORATION = args.exploration
+    TESTING = args.testing
+    MAP_NAME = args.map_name
+    SLIPPERY = args.slippery
+    render = "human" if args.render else None
+    GAMMA = args.gamma
 
-    env = gym.make("FrozenLake-v1", map_name="8x8", is_slippery=False)
-    test_env = gym.make("FrozenLake-v1", map_name="8x8", is_slippery=False)
+    env = gym.make("FrozenLake-v1", map_name=MAP_NAME, is_slippery=SLIPPERY)
+    test_env = gym.make("FrozenLake-v1", map_name=MAP_NAME, is_slippery=SLIPPERY)
     demo_env = gym.make(
-        "FrozenLake-v1", map_name="8x8", render_mode="human", is_slippery=False
+        "FrozenLake-v1", map_name=MAP_NAME, render_mode=render, is_slippery=SLIPPERY
     )
-    agent = Agent(env)
+    agent = Agent(env, GAMMA)
 
     total_rewards = 0
     best_reward = 0
@@ -98,7 +105,7 @@ if __name__ == "__main__":
             agent.explore_env(EXPLORATION)
             agent.update_values()
             total_rewards = 0
-            for i in range(20):
+            for i in range(TESTING):
                 rewards = agent.test_policy(test_env)
                 if best_reward < rewards:
                     best_reward = rewards
@@ -121,3 +128,6 @@ if __name__ == "__main__":
         env.close()
         test_env.close()
         demo_env.close()
+
+if __name__ == "__main__":
+    main()

@@ -1,3 +1,4 @@
 .venv
-.vsocde
+.vscode
 logs
+ml_dl_from_scratch.egg-info
