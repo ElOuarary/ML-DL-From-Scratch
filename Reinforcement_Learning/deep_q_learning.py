@@ -76,7 +76,7 @@ class Agent:
         return total_reward
 
 def main():
-    env = gym.make("LunarLander-v3")
+    env = gym.make("<")
     test_env = gym.make("LunarLander-v3")
     model = keras.Sequential([
         keras.layers.InputLayer(env.observation_space.shape),
