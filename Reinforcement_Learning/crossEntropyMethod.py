@@ -32,7 +32,7 @@ def generate_batch(env, model, batch_size):
             # Softmax output is in 32 float bit does not sum up always to 1 sometimes less due to rounding
             # Which affect the np.random.choice that raises ValueError: probailities do not sum to 1
             probs = action_probs / sum(action_probs)
-            action = np.random.choice([0, 1, 2], p=probs)
+            action = np.random.choice(range(env.action_space.n), p=probs)
             next_obs, reward, terminated, truncated, _ = env.step(action)
             episode_reward += reward
             step = EpisodeStep(obs, action)

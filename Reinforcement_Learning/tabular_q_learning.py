@@ -61,7 +61,7 @@ def main():
     arg_parser = argparse.ArgumentParser()
     arg_parser.add_argument("--alpha", type=float, default=0.1)
     arg_parser.add_argument("--gamma", type=float, default=0.9)
-    arg_parser.add_argument("--exploration", type=int, default=1000)
+    arg_parser.add_argument("--exploration", type=int, default=50_000)
     arg_parser.add_argument("--testing", type=int, default=20)
     arg_parser.add_argument("--render", type=bool, default=False)
 

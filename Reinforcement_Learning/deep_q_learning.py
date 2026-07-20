@@ -1,95 +1,115 @@
-from collections import deque
 import gymnasium as gym
-import matplotlib.pyplot as plt
 import numpy as np
-from tensorflow import keras
 import tensorflow as tf
+from tensorflow import keras
 
-replay_buffer = deque(maxlen=2000)
+from collections import deque, namedtuple
 
-env = gym.make("Acrobot-v1", render_mode="human")
+ALPHA = 0.001
+BATCH_SIZE = 32
+GAMMA = 0.95
+REPLAY_BUFFER_SIZE = 10_000
 
-input_shape = env.observation_space.shape
-n_outputs = 3
 
-model = keras.Sequential([
-    keras.layers.Dense(32, activation="elu", input_shape=input_shape),
-    keras.layers.Dense(32, activation="elu"),
-    keras.layers.Dense(n_outputs)
-])
+STEP = namedtuple("Step", field_names=("state", "action", "reward", "next_state", "done"))
 
-target = keras.models.clone_model(model)
-target.set_weights(model.get_weights())
+class Agent:
+    def __init__(self, env, epsilon, gamma, net, tg_net, loss_fn, optimizer):
+        self.env = env
+        self.state, _ = self.env.reset()
+        self.action_space = env.action_space.n
+        self.epsilon = epsilon
+        self.gamma = gamma
+        self.net = net
+        self.tg_net = tg_net
+        self.loss_fn = loss_fn
+        self.optimizer = optimizer
+        self.replay_buffer = deque(maxlen=1000)
 
-def epsilon_greedy_policy(state, epsilon=0):
-    if np.random.rand() < epsilon:
-        return np.random.randint(n_outputs)
-    else:
-        Q_values = model.predict(state[np.newaxis])[0]
-        return Q_values.argmax()
-    
-def sample_experiences(batch_size):
-    indices = np.random.randint(len(replay_buffer), size=batch_size)
-    batch = [replay_buffer[index] for index in indices]
-    return [
-        np.array([experience[field_index] for experience in batch])
-        for field_index in range(6)
-    ] # [states, actions, rewards, next_states, dones, truncateds]
-    
-def play_one_step(env, state, epsilon):
-    action = epsilon_greedy_policy(state, epsilon)
-    next_state, reward, truncated, terminated, info = env.step(action)
-    replay_buffer.append([state, action, reward, next_state, terminated, truncated])
-    return next_state, reward, truncated, terminated, info
-
-batch_size = 32
-discount_factor = .95
-optimizer = keras.optimizers.Nadam(learning_rate=1e-2)
-loss_fn = keras.losses.mse
-
-def training_step(batch_size):
-    experiences = sample_experiences(batch_size)
-    states, actions, rewards, next_states, terminateds, truncateds = experiences
-    next_Q_values = model.predict(next_states, verbose=False)
-    best_next_actions = next_Q_values.argmax(axis=1)
-    next_mask = tf.one_hot(best_next_actions, n_outputs).numpy()
-    max_next_Q_values = (target.predict(next_states, verbose=0) * next_mask).sum(axis=1)
-    # max_next_Q_values = next_Q_values.max(axis=1)
-    runs = 1 - (terminateds | truncateds)
-    target_Q_values = rewards + runs * discount_factor * max_next_Q_values
-    target_Q_values = target_Q_values.reshape(-1, 1)
-    mask = tf.one_hot(actions, n_outputs)
-    
-    with tf.GradientTape() as tape:
-        all_Q_values = model(states)
-        Q_values = tf.reduce_sum(all_Q_values * mask, axis=1, keepdims=True)
-        loss = tf.reduce_mean(loss_fn(target_Q_values, Q_values))
-    
-    grads = tape.gradient(loss, model.trainable_variables)
-    optimizer.apply_gradients(zip(grads, model.trainable_variables))
-    
-for episode in range(600):
-    sum_rewards = []
-    obs, info = env.reset()
-    all_rewards = 0
-    for step in range(500):
-        print(f"Episode: {episode} _ Step: {step}")
-        epsilon = max(1 - episode / 500, .01)
-        obs, reward, terminated, truncated, info = play_one_step(env, obs, epsilon)
-        all_rewards += reward  
+    def explore(self):
+        if np.random.sample() < max(0.01, self.epsilon):
+            action = self.env.action_space.sample()
+        else:
+            action = self.net(self.state[np.newaxis]).argmax()
+        next_state, reward, terminated, truncated, _ = self.env.step(action)
+        self.replay_buffer.append(STEP(state=self.state, action=action, reward=reward, next_state=next_state, done=0 if terminated or truncated else 1))
         if terminated or truncated:
-            break
-        
-    sum_rewards.append(all_rewards)
-    all_rewards = 0
+            self.state, _ = self.env.reset()
     
-    if episode % 50 == 0:
-        target.set_weights(model.get_weights())
-        
-    if episode > 50:
-        training_step(batch_size)
-        
-plt.plot(range(1, 601), sum_rewards)
-plt.show()
+    def sample_batch(self, batch_size):
+        indices = np.random.choice(range(len(self.replay_buffer)), batch_size, replace=False)
+        states, actions, rewards, next_states, done = zip(*[self.replay_buffer[idx] for idx in indices])
+        states, actions, rewards, next_states, done = tf.constant(states), tf.constant(actions), tf.constant(rewards, dtype=tf.float32), tf.constant(next_states, dtype=tf.float32), tf.constant(done, dtype=tf.float32)
+        states, actions, rewards, next_states, done = tf.reshape(states, (batch_size, -1)), tf.reshape(actions, (batch_size, -1)), tf.reshape(rewards, (batch_size, -1)), tf.reshape(next_states, (batch_size, -1)), tf.reshape(done, (batch_size, -1))
+        return states, actions, rewards, next_states, done
+    
+    def compute_loss(self, state, reward, action, next_state, done):
+        next_state_value = tf.reduce_max(self.tg_net(next_state), axis=1)
+        next_state_value = tf.reshape(next_state_value, (next_state_value.shape[0], -1))
 
-model.save("DQL_acrobat_policy.keras") 
+        q_value_target = reward + self.gamma * done * next_state_value
+        mask = tf.one_hot(action, self.action_space)
+        with tf.GradientTape() as tape:
+            q_value = self.net(state)
+            q_value = tf.reduce_sum(q_value * mask, axis=1, keepdims=True)
+            loss = tf.reduce_sum(self.loss_fn(q_value_target, q_value))
+        gradients = tape.gradient(loss, self.net.trainable_variables)
+        self.optimizer.apply(gradients,self.net.trainable_variables )
+        return loss
+    
+    def train_model(self, batch_size):
+        states, actions, rewards, next_states, done = self.sample_batch(batch_size)
+        loss = self.compute_loss(states, rewards, actions, next_states, done)
+        return loss
+
+    def test(self, test_env):
+        state, _ = test_env.reset()
+        total_reward = 0
+        while True:
+            q_values = self.net(state[np.newaxis])
+            action = tf.argmax(q_values).numpy()[0]
+            next_state, reward, terminated, truncated, _ = test_env.step(action)
+            total_reward += reward
+            if terminated or truncated:
+                break
+            state = next_state
+        return total_reward
+
+def main():
+    env = gym.make("LunarLander-v3")
+    test_env = gym.make("LunarLander-v3")
+    model = keras.Sequential([
+        keras.layers.InputLayer(env.observation_space.shape),
+        keras.layers.Dense(256),
+        keras.layers. Dense(4)
+    ])
+    tg_model = tf.keras.models.clone_model(model)
+    tg_model.set_weights(model.get_weights())
+
+    loss_fn = keras.losses.MeanSquaredError()
+    optimizer = keras.optimizers.Nadam()
+    agent = Agent(env, 1, 0.95, model, tg_model, loss_fn, optimizer)
+
+    for i in range(10_000):
+        agent.explore()
+
+        if len(agent.replay_buffer) >= 50:
+            loss = agent.train_model(32)
+
+            total_rewards = 0
+            for _ in range(20):
+                total_rewards += agent.test(test_env)
+
+            mean_reward = total_rewards / 20
+            if mean_reward > 200:
+                print("Problem Solved")
+        
+            print(f"Iteration: {i} - Loss {loss} - Mean Reward: {mean_reward}")
+
+        if i % 50 == 0:
+            print("Target Model Updating")
+            agent.tg_net.set_weights(agent.net.get_weights())
+
+
+if __name__ == "__main__":
+    main()
