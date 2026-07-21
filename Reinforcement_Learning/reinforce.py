@@ -8,8 +8,7 @@ def play_one_step(env, obs, model, loss_fn):
     with tf.GradientTape() as tape:
         proba_distributions = model(obs[np.newaxis])
         action = np.random.choice([0, 1], p=proba_distributions.numpy()[0])
-        y_target = tf.one_hot([action], depth=2)
-        loss = loss_fn(y_target, proba_distributions)
+        loss = loss_fn(tf.constant([action]), proba_distributions)
     gradient = tape.gradient(loss, model.trainable_variables)
     obs, reward, terminated, truncated, _ = env.step(action)
     return obs, reward, terminated, truncated, gradient
@@ -52,7 +51,7 @@ def test(env, model):
     total_rewards = 0
     while True:
         proba_disctribution = model(obs[np.newaxis]).numpy()[0]
-        action = np.random.choice([0, 1], p=proba_disctribution)
+        action = np.argmax(proba_disctribution)
         obs, reward, termianted, truncated, _ = env.step(action)
         total_rewards += reward
         if termianted or truncated:
@@ -69,12 +68,12 @@ def main():
 
     model = keras.Sequential([
         keras.layers.InputLayer((4,)),
-        keras.layers.Dense(128),
+        keras.layers.Dense(128, "relu"),
         keras.layers.Dense(2, activation="softmax")
     ])
 
-    optimizer = keras.optimizers.Nadam(learning_rate=0.01)
-    loss_fn = keras.losses.BinaryCrossentropy()
+    optimizer = keras.optimizers.Nadam(learning_rate=0.001)
+    loss_fn = keras.losses.SparseCategoricalCrossentropy()
 
     best_reward = None
     iteration = 0
@@ -84,11 +83,10 @@ def main():
 
         all_mean_grads = []
         for var_index in range(len(model.trainable_variables)):
-            mean_grads = tf.reduce_mean([
-                reward * all_gradients[eps_idx][step_id][var_index]
-                for eps_idx, episode in enumerate(all_discounted_normalize_rewards)
-                    for step_id, reward in enumerate(episode)
-            ], axis=0)
+            mean_grads = tf.reduce_mean(
+                [final_reward * all_gradients[episode_index][step][var_index]
+                    for episode_index, final_rewards in enumerate(all_discounted_normalize_rewards)
+                        for step, final_reward in enumerate(final_rewards)], axis=0)
             all_mean_grads.append(mean_grads)
 
         optimizer.apply_gradients(zip(all_mean_grads, model.trainable_variables))
@@ -108,9 +106,23 @@ def main():
             print("Problem Solved")
             break
 
-    demo = gym.make("CartPole-v1", render_mode="human")
-    demo_test = test(demo, model)
-    print(f"Demo testing Total Reward: {demo_test}")
+    env.close()
+    test_env.close()
+    
+    demo = gym.make("CartPole-v1", render_mode="rgb_array")
+    obs, _ = demo.reset()
+    frames = []
+    for _ in range(500):
+        frame = demo.render()  # returns RGB array
+        frames.append(frame)
+        action = np.argmax(model(obs[np.newaxis]).numpy()[0])
+        obs, _, done, truncated, _ = demo.step(action)
+        if done or truncated:
+            break
+    # Save as GIF using imageio
+    import imageio
+    imageio.mimsave("cartpole_demo.gif", frames, fps=30)
+    print("Saved demo to cartpole_demo.gif")
 
 if __name__ == "__main__":
     main()
