@@ -10,7 +10,6 @@ BATCH_SIZE = 32
 GAMMA = 0.95
 REPLAY_BUFFER_SIZE = 10_000
 
-
 STEP = namedtuple("Step", field_names=("state", "action", "reward", "next_state", "done"))
 
 class Agent:
@@ -24,37 +23,38 @@ class Agent:
         self.tg_net = tg_net
         self.loss_fn = loss_fn
         self.optimizer = optimizer
-        self.replay_buffer = deque(maxlen=1000)
+        self.replay_buffer = deque(maxlen=REPLAY_BUFFER_SIZE)
 
     def explore(self):
         if np.random.sample() < max(0.01, self.epsilon):
             action = self.env.action_space.sample()
         else:
-            action = self.net(self.state[np.newaxis]).argmax()
+            action = tf.argmax(self.net(self.state[np.newaxis]), axis=-1)
         next_state, reward, terminated, truncated, _ = self.env.step(action)
         self.replay_buffer.append(STEP(state=self.state, action=action, reward=reward, next_state=next_state, done=0 if terminated or truncated else 1))
         if terminated or truncated:
             self.state, _ = self.env.reset()
+        else:
+            self.state = next_state
     
     def sample_batch(self, batch_size):
         indices = np.random.choice(range(len(self.replay_buffer)), batch_size, replace=False)
         states, actions, rewards, next_states, done = zip(*[self.replay_buffer[idx] for idx in indices])
         states, actions, rewards, next_states, done = tf.constant(states), tf.constant(actions), tf.constant(rewards, dtype=tf.float32), tf.constant(next_states, dtype=tf.float32), tf.constant(done, dtype=tf.float32)
-        states, actions, rewards, next_states, done = tf.reshape(states, (batch_size, -1)), tf.reshape(actions, (batch_size, -1)), tf.reshape(rewards, (batch_size, -1)), tf.reshape(next_states, (batch_size, -1)), tf.reshape(done, (batch_size, -1))
+        states, rewards, next_states, done = tf.reshape(states, (batch_size, -1)), tf.reshape(rewards, (batch_size, -1)), tf.reshape(next_states, (batch_size, -1)), tf.reshape(done, (batch_size, -1))
         return states, actions, rewards, next_states, done
     
     def compute_loss(self, state, reward, action, next_state, done):
-        next_state_value = tf.reduce_max(self.tg_net(next_state), axis=1)
-        next_state_value = tf.reshape(next_state_value, (next_state_value.shape[0], -1))
-
+        next_state_value = tf.reduce_max(self.tg_net(next_state), axis=-1)
+        
         q_value_target = reward + self.gamma * done * next_state_value
         mask = tf.one_hot(action, self.action_space)
         with tf.GradientTape() as tape:
             q_value = self.net(state)
-            q_value = tf.reduce_sum(q_value * mask, axis=1, keepdims=True)
-            loss = tf.reduce_sum(self.loss_fn(q_value_target, q_value))
+            q_value_masked = tf.reduce_sum(mask * q_value, axis=-1, keepdims=True)
+            loss = self.loss_fn(q_value_target, q_value_masked)
         gradients = tape.gradient(loss, self.net.trainable_variables)
-        self.optimizer.apply(gradients,self.net.trainable_variables )
+        self.optimizer.apply_gradients(zip(gradients,self.net.trainable_variables))
         return loss
     
     def train_model(self, batch_size):
@@ -67,7 +67,7 @@ class Agent:
         total_reward = 0
         while True:
             q_values = self.net(state[np.newaxis])
-            action = tf.argmax(q_values).numpy()[0]
+            action = tf.argmax(q_values, axis=-1).numpy()[0]
             next_state, reward, terminated, truncated, _ = test_env.step(action)
             total_reward += reward
             if terminated or truncated:
@@ -76,7 +76,7 @@ class Agent:
         return total_reward
 
 def main():
-    env = gym.make("<")
+    env = gym.make("LunarLander-v3") # problem in environment constrcution
     test_env = gym.make("LunarLander-v3")
     model = keras.Sequential([
         keras.layers.InputLayer(env.observation_space.shape),
@@ -87,29 +87,37 @@ def main():
     tg_model.set_weights(model.get_weights())
 
     loss_fn = keras.losses.MeanSquaredError()
-    optimizer = keras.optimizers.Nadam()
+    optimizer = keras.optimizers.Nadam(learning_rate=ALPHA)
     agent = Agent(env, 1, 0.95, model, tg_model, loss_fn, optimizer)
 
-    for i in range(10_000):
-        agent.explore()
+    try:
+        for i in range(1, 10_001):
+            agent.explore()
+            agent.epsilon = max(1 - i / 9_000, 0.01)
 
-        if len(agent.replay_buffer) >= 50:
-            loss = agent.train_model(32)
+            if len(agent.replay_buffer) >= 50:
+                loss = agent.train_model(32)
 
-            total_rewards = 0
-            for _ in range(20):
-                total_rewards += agent.test(test_env)
+                total_rewards = 0
+                for _ in range(10):
+                    total_rewards += agent.test(test_env)
 
-            mean_reward = total_rewards / 20
-            if mean_reward > 200:
-                print("Problem Solved")
-        
-            print(f"Iteration: {i} - Loss {loss} - Mean Reward: {mean_reward}")
+                mean_reward = total_rewards / 10
+                if mean_reward > 200:
+                    print("Problem Solved")
+                    break
+                
+                print(f"Iteration: {i} - Loss {loss} - Mean Reward: {mean_reward}")
 
-        if i % 50 == 0:
-            print("Target Model Updating")
-            agent.tg_net.set_weights(agent.net.get_weights())
+            if i % 50 == 0:
+                print("Target Model Updating")
+                agent.tg_net.set_weights(agent.net.get_weights())
 
+    except KeyboardInterrupt:
+        pass
+    finally:
+        env.close()
+        test_env.close()
 
 if __name__ == "__main__":
     main()
