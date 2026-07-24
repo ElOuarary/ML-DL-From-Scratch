@@ -10,8 +10,8 @@ from collections import deque, namedtuple
 parser = argparse.ArgumentParser()
 parser.add_argument("--alpha", type=float, default=0.001)
 parser.add_argument("--batch-size", type=int, default=32)
-parser.add_argument("--gamma", type=float, default=0.95)
-parser.add_argument("--buffer-size", type=int, default=2_000)
+parser.add_argument("--gamma", type=float, default=0.99)
+parser.add_argument("--buffer-size", type=int, default=1_500)
 
 STEP = namedtuple("Step", field_names=("state", "action", "reward", "next_state", "done"))
 
@@ -27,8 +27,6 @@ class Agent:
         self.loss_fn = loss_fn
         self.optimizer = optimizer
         self.replay_buffer = deque(maxlen=buffer_size)
-        self.low  = tf.constant([-2.5, -2.5, -10., -10., -6.2831855, -10., -0., -0.])
-        self.high = tf.constant([ 2.5,  2.5,  10.,  10.,  6.2831855,  10.,  1.,  1.])
 
     def explore(self):
         if np.random.sample() < max(0.01, self.epsilon):
@@ -50,13 +48,8 @@ class Agent:
         states, rewards, next_states, done = tf.reshape(states, (batch_size, -1)), tf.reshape(rewards, (batch_size, -1)), tf.reshape(next_states, (batch_size, -1)), tf.reshape(done, (batch_size, -1))
         return states, actions, rewards, next_states, done
 
-    def normalize_state(self, state):
-        return 2 * (state - self.low) / (self.high - self.low) - 1
-
     @tf.function
     def compute_loss(self, state, reward, action, next_state, done):
-        next_state = self.normalize_state(next_state)
-        state = self.normalize_state(state)
         next_state_value = tf.reduce_max(self.tg_net(next_state), axis=-1)
         
         q_value_target = reward + self.gamma * done * next_state_value
@@ -67,7 +60,8 @@ class Agent:
             loss = self.loss_fn(q_value_target, q_value_masked)
         gradients = tape.gradient(loss, self.net.trainable_variables)
         self.optimizer.apply_gradients(zip(gradients,self.net.trainable_variables))
-        return loss
+        flat_grads = tf.concat([tf.reshape(g, [-1]) for g in gradients], axis=0)
+        return loss, tf.reduce_mean(flat_grads)
     
     def train_model(self, batch_size):
         states, actions, rewards, next_states, done = self.sample_batch(batch_size)
@@ -78,7 +72,6 @@ class Agent:
         state, _ = test_env.reset()
         total_reward = 0
         while True:
-            state = self.normalize_state(state)
             q_values = self.net(state[np.newaxis])
             action = tf.argmax(q_values, axis=-1).numpy()[0]
             next_state, reward, terminated, truncated, _ = test_env.step(action)
@@ -99,7 +92,8 @@ def main():
     test_env = gym.make("LunarLander-v3")
     model = keras.Sequential([
         keras.layers.InputLayer(env.observation_space.shape),
-        keras.layers.Dense(256),
+        keras.layers.Dense(256, activation="relu"),
+        keras.layers.Dense(512, activation="relu"),
         keras.layers.Dense(4)
     ])
     tg_model = keras.models.clone_model(model)
@@ -122,7 +116,7 @@ def main():
             agent.epsilon = max(1 - i / 9_000, 0.01)
 
             if len(agent.replay_buffer) >= 50:
-                loss = agent.train_model(batch_size)
+                loss, gradient_mean = agent.train_model(batch_size)
 
                 total_rewards = 0
                 for _ in range(10):
@@ -131,6 +125,7 @@ def main():
                 mean_reward = total_rewards / 10
                 with train_summary_writer.as_default():
                     tf.summary.scalar("train_loss", loss, step=i)
+                    tf.summary.scalar("gradient_mean", gradient_mean, step=i)
 
                 with test_summary_writer.as_default():
                     tf.summary.scalar("test_mean_reward", mean_reward, step=i)
@@ -138,9 +133,6 @@ def main():
                 if mean_reward > 200:
                     print("Problem Solved")
                     break
-                
-
-                print(f"Iteration: {i} - Loss {loss} - Mean Reward: {mean_reward}")
 
             if i % 100 == 0:
                 print("Target Model Updating")

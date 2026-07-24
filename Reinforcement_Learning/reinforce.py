@@ -4,12 +4,29 @@ import tensorflow as tf
 
 from tensorflow import keras
 
-def play_one_step(env, obs, model, loss_fn):
+import argparse
+from datetime import datetime
+
+arg_parser = argparse.ArgumentParser()
+arg_parser.add_argument("--update", type=int, default=10)
+arg_parser.add_argument("--alpha", type=float, default=0.001)
+arg_parser.add_argument("--gamma", type=float, default=0.99)
+
+@tf.function
+def predict(model, obs):
+    return model(obs)
+
+def compute_gradient(model, obs, loss_fn):
     with tf.GradientTape() as tape:
-        proba_distributions = model(obs[np.newaxis])
+        proba_distributions = predict(model,  obs)
         action = np.random.choice([0, 1], p=proba_distributions.numpy()[0])
-        loss = loss_fn(tf.constant([action]), proba_distributions)
-    gradient = tape.gradient(loss, model.trainable_variables)
+        y_target = tf.one_hot([action], depth=2)
+        loss = loss_fn(y_target, proba_distributions)
+    return action, tape.gradient(loss, model.trainable_variables)
+
+def play_one_step(env, obs, model, loss_fn):
+    obs = tf.constant(obs[np.newaxis])
+    action, gradient = compute_gradient(model, obs, loss_fn)
     obs, reward, terminated, truncated, _ = env.step(action)
     return obs, reward, terminated, truncated, gradient
 
@@ -50,8 +67,8 @@ def test(env, model):
     obs, _ = env.reset()
     total_rewards = 0
     while True:
-        proba_disctribution = model(obs[np.newaxis]).numpy()[0]
-        action = np.argmax(proba_disctribution)
+        proba_distribution = model(obs[np.newaxis]).numpy()[0]
+        action = np.argmax(proba_distribution)
         obs, reward, termianted, truncated, _ = env.step(action)
         total_rewards += reward
         if termianted or truncated:
@@ -60,8 +77,10 @@ def test(env, model):
 
 
 def main():
-    episode_update = 10
-    gamma = 0.95
+    args = arg_parser.parse_args()
+    EPISODE_UPDATE = args.update
+    ALPHA = args.alpha
+    GAMMA = args.gamma
 
     env = gym.make("CartPole-v1")
     test_env = gym.make("CartPole-v1")
@@ -72,42 +91,55 @@ def main():
         keras.layers.Dense(2, activation="softmax")
     ])
 
-    optimizer = keras.optimizers.Nadam(learning_rate=0.001)
-    loss_fn = keras.losses.SparseCategoricalCrossentropy()
+    optimizer = keras.optimizers.Nadam(learning_rate=ALPHA)
+    loss_fn = keras.losses.CategoricalCrossentropy()
+
+    current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
+    test_logs_dir = "logs/dqn/CartPole/test/" + current_time
+
+    test_summary_writer = tf.summary.create_file_writer(test_logs_dir)
 
     best_reward = None
     iteration = 0
-    while True:
-        all_rewards, all_gradients = play_multiple_episodes(env, model, loss_fn, episode_update)
-        all_discounted_normalize_rewards = discounte_normalize(all_rewards, gamma)
+    try:
 
-        all_mean_grads = []
-        for var_index in range(len(model.trainable_variables)):
-            mean_grads = tf.reduce_mean(
-                [final_reward * all_gradients[episode_index][step][var_index]
-                    for episode_index, final_rewards in enumerate(all_discounted_normalize_rewards)
-                        for step, final_reward in enumerate(final_rewards)], axis=0)
-            all_mean_grads.append(mean_grads)
+        while True:
+            all_rewards, all_gradients = play_multiple_episodes(env, model, loss_fn, EPISODE_UPDATE)
+            all_discounted_normalize_rewards = discounte_normalize(all_rewards, GAMMA)
 
-        optimizer.apply_gradients(zip(all_mean_grads, model.trainable_variables))
+            all_mean_grads = []
+            for var_index in range(len(model.trainable_variables)):
+                mean_grads = tf.reduce_mean(
+                    [final_reward * all_gradients[episode_index][step][var_index]
+                        for episode_index, final_rewards in enumerate(all_discounted_normalize_rewards)
+                            for step, final_reward in enumerate(final_rewards)], axis=0)
+                all_mean_grads.append(mean_grads)
 
-        total_reward = 0
-        for _ in range(4):
-            reward = test(test_env, model)
-            total_reward += reward
-            if best_reward is None or best_reward < reward:
-                print(f"Update best reward {best_reward} -> {reward}")
-                best_reward = reward
-        mean_reward = total_reward / 4
-        print(f"Iteration {iteration} - Mean Reward {mean_reward}")
-        iteration += 1
-        
-        if mean_reward > 490:
-            print("Problem Solved")
-            break
+            optimizer.apply_gradients(zip(all_mean_grads, model.trainable_variables))
 
-    env.close()
-    test_env.close()
+            total_reward = 0
+            for _ in range(4):
+                reward = test(test_env, model)
+                total_reward += reward
+                if best_reward is None or best_reward < reward:
+                    print(f"Update best reward {best_reward} -> {reward}")
+                    best_reward = reward
+            mean_reward = total_reward / 4
+
+            with test_summary_writer.as_default():
+                tf.summary.scalar("test_mean_reward", mean_reward, step=iteration)
+
+            iteration += 1
+
+            if mean_reward > 490:
+                model.save("./reinforceMethod_CartPole.keras")
+                print("Problem Solved")
+                break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        env.close()
+        test_env.close()
     
     demo = gym.make("CartPole-v1", render_mode="rgb_array")
     obs, _ = demo.reset()
