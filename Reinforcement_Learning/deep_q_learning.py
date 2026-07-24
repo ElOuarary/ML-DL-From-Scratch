@@ -1,11 +1,11 @@
+import argparse
+from collections import deque, namedtuple
+from datetime import datetime
+
 import gymnasium as gym
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
-
-import argparse
-from datetime import datetime
-from collections import deque, namedtuple
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--alpha", type=float, default=0.001)
@@ -13,10 +13,15 @@ parser.add_argument("--batch-size", type=int, default=32)
 parser.add_argument("--gamma", type=float, default=0.99)
 parser.add_argument("--buffer-size", type=int, default=1_500)
 
-STEP = namedtuple("Step", field_names=("state", "action", "reward", "next_state", "done"))
+STEP = namedtuple(
+    "Step", field_names=("state", "action", "reward", "next_state", "done")
+)
+
 
 class Agent:
-    def __init__(self, env, epsilon, gamma, net, tg_net, loss_fn, optimizer, buffer_size):
+    def __init__(
+        self, env, epsilon, gamma, net, tg_net, loss_fn, optimizer, buffer_size
+    ):
         self.env = env
         self.state, _ = self.env.reset()
         self.action_space = env.action_space.n
@@ -35,23 +40,46 @@ class Agent:
             action = tf.argmax(self.net(self.state[np.newaxis]), axis=-1)
             action = action.numpy()[0]
         next_state, reward, terminated, truncated, _ = self.env.step(action)
-        self.replay_buffer.append(STEP(state=self.state, action=action, reward=reward, next_state=next_state, done=0 if terminated or truncated else 1))
+        self.replay_buffer.append(
+            STEP(
+                state=self.state,
+                action=action,
+                reward=reward,
+                next_state=next_state,
+                done=0 if terminated or truncated else 1,
+            )
+        )
         if terminated or truncated:
             self.state, _ = self.env.reset()
         else:
             self.state = next_state
-    
+
     def sample_batch(self, batch_size):
-        indices = np.random.choice(range(len(self.replay_buffer)), batch_size, replace=False)
-        states, actions, rewards, next_states, done = zip(*[self.replay_buffer[idx] for idx in indices])
-        states, actions, rewards, next_states, done = tf.constant(states), tf.constant(actions), tf.constant(rewards, dtype=tf.float32), tf.constant(next_states, dtype=tf.float32), tf.constant(done, dtype=tf.float32)
-        states, rewards, next_states, done = tf.reshape(states, (batch_size, -1)), tf.reshape(rewards, (batch_size, -1)), tf.reshape(next_states, (batch_size, -1)), tf.reshape(done, (batch_size, -1))
+        indices = np.random.choice(
+            range(len(self.replay_buffer)), batch_size, replace=False
+        )
+        states, actions, rewards, next_states, done = zip(
+            *[self.replay_buffer[idx] for idx in indices]
+        )
+        states, actions, rewards, next_states, done = (
+            tf.constant(states),
+            tf.constant(actions),
+            tf.constant(rewards, dtype=tf.float32),
+            tf.constant(next_states, dtype=tf.float32),
+            tf.constant(done, dtype=tf.float32),
+        )
+        states, rewards, next_states, done = (
+            tf.reshape(states, (batch_size, -1)),
+            tf.reshape(rewards, (batch_size, -1)),
+            tf.reshape(next_states, (batch_size, -1)),
+            tf.reshape(done, (batch_size, -1)),
+        )
         return states, actions, rewards, next_states, done
 
     @tf.function
     def compute_loss(self, state, reward, action, next_state, done):
         next_state_value = tf.reduce_max(self.tg_net(next_state), axis=-1)
-        
+
         q_value_target = reward + self.gamma * done * next_state_value
         mask = tf.one_hot(action, self.action_space)
         with tf.GradientTape() as tape:
@@ -59,10 +87,10 @@ class Agent:
             q_value_masked = tf.reduce_sum(mask * q_value, axis=-1, keepdims=True)
             loss = self.loss_fn(q_value_target, q_value_masked)
         gradients = tape.gradient(loss, self.net.trainable_variables)
-        self.optimizer.apply_gradients(zip(gradients,self.net.trainable_variables))
+        self.optimizer.apply_gradients(zip(gradients, self.net.trainable_variables))
         flat_grads = tf.concat([tf.reshape(g, [-1]) for g in gradients], axis=0)
         return loss, tf.reduce_mean(flat_grads)
-    
+
     def train_model(self, batch_size):
         states, actions, rewards, next_states, done = self.sample_batch(batch_size)
         loss = self.compute_loss(states, rewards, actions, next_states, done)
@@ -81,6 +109,7 @@ class Agent:
             state = next_state
         return total_reward
 
+
 def main():
     args = parser.parse_args()
     alpha = args.alpha
@@ -90,12 +119,14 @@ def main():
 
     env = gym.make("LunarLander-v3")
     test_env = gym.make("LunarLander-v3")
-    model = keras.Sequential([
-        keras.layers.InputLayer(env.observation_space.shape),
-        keras.layers.Dense(256, activation="relu"),
-        keras.layers.Dense(512, activation="relu"),
-        keras.layers.Dense(4)
-    ])
+    model = keras.Sequential(
+        [
+            keras.layers.InputLayer(env.observation_space.shape),
+            keras.layers.Dense(256, activation="relu"),
+            keras.layers.Dense(512, activation="relu"),
+            keras.layers.Dense(4),
+        ]
+    )
     tg_model = keras.models.clone_model(model)
     tg_model.set_weights(model.get_weights())
 
@@ -103,13 +134,13 @@ def main():
     optimizer = keras.optimizers.Nadam(learning_rate=alpha)
     agent = Agent(env, 1, gamma, model, tg_model, loss_fn, optimizer, buffer_size)
 
-    current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
+    current_time = datetime.now(datetime.timetz).strftime("%Y%m%d-%H%M%S")
     train_logs_dir = "logs/dqn/LunarLander/train/" + current_time
     test_logs_dir = "logs/dqn/LunarLander/test/" + current_time
 
     train_summary_writer = tf.summary.create_file_writer(train_logs_dir)
     test_summary_writer = tf.summary.create_file_writer(test_logs_dir)
-    
+
     try:
         for i in range(1, 10_001):
             agent.explore()
@@ -143,6 +174,7 @@ def main():
     finally:
         env.close()
         test_env.close()
+
 
 if __name__ == "__main__":
     main()

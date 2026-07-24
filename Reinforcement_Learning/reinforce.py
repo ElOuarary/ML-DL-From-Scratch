@@ -135,26 +135,27 @@ def main():
                 model.save("./reinforceMethod_CartPole.keras")
                 print("Problem Solved")
                 break
+
+        demo = gym.make("CartPole-v1", render_mode="rgb_array")
+        obs, _ = demo.reset()
+        frames = []
+        for _ in range(500):
+            frame = demo.render()
+            frames.append(frame)
+            action = np.argmax(model(obs[np.newaxis]).numpy()[0])
+            obs, _, done, truncated, _ = demo.step(action)
+            if done or truncated:
+                break
+        # Save as GIF using imageio
+        import imageio
+        imageio.mimsave("cartpole_demo.gif", frames, fps=30)
+        print("Saved demo to cartpole_demo.gif")
     except KeyboardInterrupt:
         pass
     finally:
         env.close()
         test_env.close()
-    
-    demo = gym.make("CartPole-v1", render_mode="rgb_array")
-    obs, _ = demo.reset()
-    frames = []
-    for _ in range(500):
-        frame = demo.render()  # returns RGB array
-        frames.append(frame)
-        action = np.argmax(model(obs[np.newaxis]).numpy()[0])
-        obs, _, done, truncated, _ = demo.step(action)
-        if done or truncated:
-            break
-    # Save as GIF using imageio
-    import imageio
-    imageio.mimsave("cartpole_demo.gif", frames, fps=30)
-    print("Saved demo to cartpole_demo.gif")
+
 
 if __name__ == "__main__":
     main()

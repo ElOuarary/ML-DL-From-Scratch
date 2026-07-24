@@ -20,6 +20,7 @@ dependencies = [
 value_iteration = "Reinforcement_Learning.value_iteration:main"
 tabular_q_learning = "Reinforcement_Learning.tabular_q_learning:main"
 deep_q_learning = "Reinforcement_Learning.deep_q_learning:main"
+reinforce = "Reinforcement_Learning.reinforce:main"
 
 [tool.uv]
 package = true
