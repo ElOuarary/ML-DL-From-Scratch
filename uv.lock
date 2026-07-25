@@ -754,6 +754,7 @@ source = { editable = "." }
 dependencies = [
     { name = "arcade" },
     { name = "gymnasium", extra = ["box2d", "classic-control", "mujoco"] },
+    { name = "imageio" },
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "swig" },
@@ -767,6 +768,7 @@ dependencies = [
 requires-dist = [
     { name = "arcade", specifier = ">=3.3.3" },
     { name = "gymnasium", extras = ["box2d", "classic-control", "classiccontrol", "mujoco"], specifier = ">=1.3.0" },
+    { name = "imageio", specifier = ">=2.37.3" },
     { name = "matplotlib", specifier = ">=3.10.9" },
     { name = "numpy", specifier = ">=2.4.4" },
     { name = "swig", specifier = ">=4.4.1" },
