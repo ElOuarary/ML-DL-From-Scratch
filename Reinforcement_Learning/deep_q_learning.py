@@ -98,11 +98,11 @@ class Agent:
         active = np.ones(test_env.num_envs)
         total_reward = np.zeros(test_env.num_envs)
         while np.any(active):
-            q_values = self.net(state)
+            q_values = self.compute_batch(state)
             action = tf.argmax(q_values, axis=-1).numpy()
             next_state, reward, terminated, truncated, _ = test_env.step(action)
             total_reward += reward * active
-            active = np.logical_and(active, terminated | truncated)
+            active = np.logical_and(active, np.logical_not(terminated | truncated))
             state = next_state
         return total_reward.mean()
 
@@ -156,9 +156,8 @@ def main():
                 loss, gradient_mean = agent.train_model(batch_size)
 
                 if i % test_steps:
-                    total_rewards = agent.test(test_env)
+                    mean_reward = agent.test(test_env)
 
-                    mean_reward = total_rewards / 10
                     with train_summary_writer.as_default():
                         tf.summary.scalar("train_loss", loss, step=i)
                         tf.summary.scalar("gradient_mean", gradient_mean, step=i)
