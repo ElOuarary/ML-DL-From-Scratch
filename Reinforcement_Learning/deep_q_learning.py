@@ -7,13 +7,6 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--alpha", type=float, default=0.0005)
-parser.add_argument("--batch-size", type=int, default=64)
-parser.add_argument("--gamma", type=float, default=0.99)
-parser.add_argument("--buffer-size", type=int, default=10_000)
-parser.add_argument("--test-steps", type=int, default=500)
-parser.add_argument("--netwokr-update", type=int, default=1000)
 
 STEP = namedtuple(
     "Step", field_names=("state", "action", "reward", "next_state", "continue_mask")
@@ -78,7 +71,7 @@ class Agent:
 
         q_value_target = (
             reward + self.gamma * continue_mask * next_state_value
-        )  # I have a problem here for computin the Bellaman equation
+        )
         mask = tf.one_hot(action, self.action_space)
         with tf.GradientTape() as tape:
             q_value = self.net(state)
@@ -89,6 +82,10 @@ class Agent:
         flat_grads = tf.concat([tf.reshape(g, [-1]) for g in gradients], axis=0)
         return loss, tf.reduce_mean(flat_grads)
 
+    @tf.function
+    def compute_batch(self, states):
+        return self.net(states)
+
     def train_model(self, batch_size):
         states, actions, rewards, next_states, continue_mask = self.sample_batch(
             batch_size
@@ -98,27 +95,36 @@ class Agent:
 
     def test(self, test_env):
         state, _ = test_env.reset()
-        total_reward = 0
-        while True:
-            q_values = self.net(state[np.newaxis])
-            action = tf.argmax(q_values, axis=-1).numpy()[0]
+        active = np.ones(test_env.num_envs)
+        total_reward = np.zeros(test_env.num_envs)
+        while np.any(active):
+            q_values = self.net(state)
+            action = tf.argmax(q_values, axis=-1).numpy()
             next_state, reward, terminated, truncated, _ = test_env.step(action)
-            total_reward += reward
-            if terminated or truncated:
-                break
+            total_reward += reward * active
+            active = np.logical_and(active, terminated | truncated)
             state = next_state
-        return total_reward
+        return total_reward.mean()
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--alpha", type=float, default=0.0005)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--buffer-size", type=int, default=10_000)
+    parser.add_argument("--test-steps", type=int, default=500)
+    parser.add_argument("--network-update", type=int, default=1000)
     args = parser.parse_args()
     alpha = args.alpha
     batch_size = args.batch_size
     gamma = args.gamma
     buffer_size = args.buffer_size
+    test_steps = args.test_steps
+    update_steps = args.network_update
 
     env = gym.make("LunarLander-v3")
-    test_env = gym.make("LunarLander-v3")
+    test_env = gym.make_vec("LunarLander-v3", num_envs=20)
     model = keras.Sequential(
         [
             keras.layers.InputLayer(env.observation_space.shape),
@@ -149,10 +155,8 @@ def main():
             if len(agent.replay_buffer) >= 500:
                 loss, gradient_mean = agent.train_model(batch_size)
 
-                if i % 500:
-                    total_rewards = 0
-                    for _ in range(10):
-                        total_rewards += agent.test(test_env)
+                if i % test_steps:
+                    total_rewards = agent.test(test_env)
 
                     mean_reward = total_rewards / 10
                     with train_summary_writer.as_default():
@@ -166,13 +170,15 @@ def main():
                         print("Problem Solved")
                         break
 
-            if i % 1000 == 0:
+            if i % update_steps == 0:
                 print("Target Model Updating")
                 agent.tg_net.set_weights(agent.net.get_weights())
 
     except KeyboardInterrupt:
         pass
     finally:
+        model.save("dqn.keras")
+        tg_model.save("target_dqn.keras")
         env.close()
         test_env.close()
 
