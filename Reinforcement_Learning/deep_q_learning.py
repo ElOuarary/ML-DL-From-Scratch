@@ -7,7 +7,6 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 
-
 STEP = namedtuple(
     "Step", field_names=("state", "action", "reward", "next_state", "continue_mask")
 )
@@ -69,9 +68,7 @@ class Agent:
     def compute_loss(self, state, reward, action, next_state, continue_mask):
         next_state_value = tf.reduce_max(self.tg_net(next_state), axis=-1)
 
-        q_value_target = (
-            reward + self.gamma * continue_mask * next_state_value
-        )
+        q_value_target = reward + self.gamma * continue_mask * next_state_value
         mask = tf.one_hot(action, self.action_space)
         with tf.GradientTape() as tape:
             q_value = self.net(state)
