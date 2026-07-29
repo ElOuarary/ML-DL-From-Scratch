@@ -7,7 +7,7 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 
-STEP = namedtuple(
+Step = namedtuple(
     "Step", field_names=("state", "action", "reward", "next_state", "continue_mask")
 )
 
@@ -31,11 +31,11 @@ class Agent:
         if np.random.sample() < self.epsilon:
             action = self.env.action_space.sample()
         else:
-            action = tf.argmax(self.net(self.state[np.newaxis]), axis=-1)
+            action = self.greedy_policy(self.state)
             action = action.numpy()[0]
         next_state, reward, terminated, truncated, _ = self.env.step(action)
         self.replay_buffer.append(
-            STEP(
+            Step(
                 state=self.state,
                 action=action,
                 reward=reward,
@@ -50,7 +50,7 @@ class Agent:
 
     def sample_batch(self, batch_size):
         indices = np.random.choice(
-            range(len(self.replay_buffer)), batch_size, replace=False
+            len(self.replay_buffer), batch_size, replace=False
         )
         states, actions, rewards, next_states, continue_mask = zip(
             *[self.replay_buffer[idx] for idx in indices]
@@ -65,6 +65,10 @@ class Agent:
         return states, actions, rewards, next_states, continue_mask
 
     @tf.function
+    def greedy_policy(self, state):
+        return tf.argmax(self.net(state[np.newaxis]), axis=-1)
+
+    @tf.function
     def compute_loss(self, state, reward, action, next_state, continue_mask):
         next_state_value = tf.reduce_max(self.tg_net(next_state), axis=-1)
 
@@ -76,8 +80,7 @@ class Agent:
             loss = self.loss_fn(q_value_target, q_value_masked)
         gradients = tape.gradient(loss, self.net.trainable_variables)
         self.optimizer.apply_gradients(zip(gradients, self.net.trainable_variables))
-        flat_grads = tf.concat([tf.reshape(g, [-1]) for g in gradients], axis=0)
-        return loss, tf.reduce_mean(flat_grads)
+        return loss, gradients
 
     @tf.function
     def compute_batch(self, states):
@@ -91,16 +94,16 @@ class Agent:
         return loss
 
     def test(self, test_env):
-        state, _ = test_env.reset()
+        states, _ = test_env.reset()
         active = np.ones(test_env.num_envs)
         total_reward = np.zeros(test_env.num_envs)
         while np.any(active):
-            q_values = self.compute_batch(state)
+            q_values = self.compute_batch(states)
             action = tf.argmax(q_values, axis=-1).numpy()
-            next_state, reward, terminated, truncated, _ = test_env.step(action)
+            next_states, reward, terminated, truncated, _ = test_env.step(action)
             total_reward += reward * active
             active = np.logical_and(active, np.logical_not(terminated | truncated))
-            state = next_state
+            states = next_states
         return total_reward.mean()
 
 
@@ -110,6 +113,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--buffer-size", type=int, default=10_000)
+    parser.add_argument("--warmup-steps", type=int, default=500)
     parser.add_argument("--test-steps", type=int, default=500)
     parser.add_argument("--network-update", type=int, default=1000)
     args = parser.parse_args()
@@ -117,6 +121,8 @@ def main():
     batch_size = args.batch_size
     gamma = args.gamma
     buffer_size = args.buffer_size
+    warmup_steps = args.warmup_steps
+    WARMUP = min(batch_size, warmup_steps)
     test_steps = args.test_steps
     update_steps = args.network_update
 
@@ -149,10 +155,11 @@ def main():
             agent.explore()
             agent.epsilon = max(1 - i / 50_000, 0.01)
 
-            if len(agent.replay_buffer) >= 500:
-                loss, gradient_mean = agent.train_model(batch_size)
+            if len(agent.replay_buffer) >= WARMUP:
+                loss, gradients = agent.train_model(batch_size)
 
-                if i % test_steps:
+                if i % test_steps == 0:
+                    gradient_mean = tf.reduce_mean(tf.concat([tf.reshape(g, [-1]) for g in gradients], axis=0))
                     mean_reward = agent.test(test_env)
 
                     with train_summary_writer.as_default():
@@ -177,6 +184,8 @@ def main():
         tg_model.save("target_dqn.keras")
         env.close()
         test_env.close()
+        test_summary_writer.close()
+        train_summary_writer.close()
 
 
 if __name__ == "__main__":
