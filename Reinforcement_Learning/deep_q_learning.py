@@ -116,6 +116,8 @@ def main():
     parser.add_argument("--warmup-steps", type=int, default=500)
     parser.add_argument("--test-steps", type=int, default=500)
     parser.add_argument("--network-update", type=int, default=1000)
+    parser.add_argument("--reward-target", type=int, default=200)
+    parser.add_argument("--train-iteration", type=int, default=100_000)
     args = parser.parse_args()
     alpha = args.alpha
     batch_size = args.batch_size
@@ -125,6 +127,8 @@ def main():
     WARMUP = min(batch_size, warmup_steps)
     test_steps = args.test_steps
     update_steps = args.network_update
+    reward_target = args.reward_target
+    train_iteration = args.train_iteration
 
     env = gym.make("LunarLander-v3")
     test_env = gym.make_vec("LunarLander-v3", num_envs=20)
@@ -151,7 +155,7 @@ def main():
     test_summary_writer = tf.summary.create_file_writer(test_logs_dir)
 
     try:
-        for i in range(1, 100_001):
+        for i in range(1, train_iteration + 1):
             agent.explore()
             agent.epsilon = max(1 - i / 50_000, 0.01)
 
@@ -169,7 +173,7 @@ def main():
                     with test_summary_writer.as_default():
                         tf.summary.scalar("test_mean_reward", mean_reward, step=i)
 
-                    if mean_reward > 200:
+                    if mean_reward > reward_target:
                         print("Problem Solved")
                         break
 
@@ -180,10 +184,25 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        demo_env = gym.make("LunarLander-v3", render_mode="rgb_array")
+        obs, _ = demo_env.reset()
+        frames = []
+        while True:
+            frame = demo_env.render()
+            frames.append(frame)
+            action = tf.argmax(model(obs[np.newaxis]), axis=-1).numpy()[0]
+            obs, reward, terminated, truncated, _ = demo_env.step(action)
+            if terminated or truncated:
+                break
+
+        import imageio
+        imageio.mimsave("DQN_LunarLander.gif", frames, fps=30)
+
         model.save("dqn.keras")
         tg_model.save("target_dqn.keras")
         env.close()
         test_env.close()
+        demo_env.close()
         test_summary_writer.close()
         train_summary_writer.close()
 
