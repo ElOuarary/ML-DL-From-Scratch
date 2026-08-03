@@ -5,7 +5,6 @@ import tensorflow as tf
 from tensorflow import keras
 
 gym.register_envs(ale_py)
-
 env = gym.make("ALE/BattleZone-v5")
 
 class Actor2Critic(keras.Model):
@@ -33,20 +32,23 @@ class Actor2Critic(keras.Model):
 @tf.numpy_function(Tout=[tf.float32, tf.int32, tf.int32])
 def env_step(action):
     next_obs, reward, termiated, truncated, _ = env.step(action)
-    return next_obs, reward, termiated | truncated
+    return next_obs.astype(np.float32), np.array(reward, np.float32), np.array(termiated | truncated, np.int32)
 
 @tf.function
 def play_episode(initial_state, model):
-    obs = tf.cast(initial_state, tf.float32)
+    obs = initial_state
+    initial_state_shape = initial_state.shape
     actions_probas = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
     values = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
     rewards = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
     i = 0
     while tf.constant(True):
-        action_logits, state_value = model(obs[np.newaxis])
+        obs = tf.expand_dims(obs, 0)
+        action_logits, state_value = model(obs)
         action = tf.random.categorical(action_logits, 1)[0, 0]
         action_proba = tf.nn.softmax(action_logits)
-        obs, reward, done= env_step(action)
+        obs, reward, done = env_step(action)
+        obs.set_shape(initial_state_shape)
 
         actions_probas = actions_probas.write(i, action_proba[0, action])
         values = values.write(i, tf.squeeze(state_value))
@@ -76,7 +78,7 @@ def play_test_episode(test_env, model):
     return total_reward
 
 def main():
-    env = gym.make("ALE/BattleZone-v5")
+    
     test_env = gym.make("ALE/BattleZone-v5")
     model = Actor2Critic(env.observation_space.shape, 18)
     gamma = 0.99
@@ -90,6 +92,7 @@ def main():
     while True:
         with tf.GradientTape() as tape:
             initial_state, _ = env.reset()
+            initial_state = tf.constant(initial_state, tf.float32)
             actions_probas, values, rewards = play_episode(initial_state, model)
             actor_loss = - tf.reduce_mean((rewards - values) * tf.math.log(actions_probas))
             discounted_rewards = discount_reward(rewards, gamma)
