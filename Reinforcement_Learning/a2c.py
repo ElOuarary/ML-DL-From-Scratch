@@ -29,35 +29,31 @@ class Actor2Critic(keras.Model):
         x = self.shared_network(obs)
         return self.actor(x), self.critic(x)
 
-@tf.numpy_function(Tout=[tf.float32, tf.int32, tf.int32])
 def env_step(action):
     next_obs, reward, termiated, truncated, _ = env.step(action)
     return next_obs.astype(np.float32), np.array(reward, np.float32), np.array(termiated | truncated, np.int32)
 
-@tf.function
 def play_episode(initial_state, model):
     obs = initial_state
-    initial_state_shape = initial_state.shape
-    actions_probas = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
-    values = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
-    rewards = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
+    actions_probas = []
+    values = []
+    rewards = []
     i = 0
-    while tf.constant(True):
+    while True:
         obs = tf.expand_dims(obs, 0)
         action_logits, state_value = model(obs)
         action = tf.random.categorical(action_logits, 1)[0, 0]
         action_proba = tf.nn.softmax(action_logits)
         obs, reward, done = env_step(action)
-        obs.set_shape(initial_state_shape)
 
-        actions_probas = actions_probas.write(i, action_proba[0, action])
-        values = values.write(i, tf.squeeze(state_value))
-        rewards = rewards.write(i, reward)
-        if tf.cast(done, tf.bool):
+        actions_probas.append(action_proba[0, action])
+        values.append(tf.squeeze(state_value))
+        rewards.append(reward)
+        if done:
             break
         i += 1
 
-    return actions_probas.stack(), values.stack(), rewards.stack()
+    return actions_probas, values, rewards
 
 def discount_reward(rewards, gamma):
     discounted_reward = np.array(rewards)
@@ -67,7 +63,9 @@ def discount_reward(rewards, gamma):
 
 def play_test_episode(test_env, model):
     states, _ = test_env.reset()
+    total_reward = 0
     while True:
+        states = tf.constant(states[np.newaxis])
         action_logits, _ = model(states)
         action_probas = tf.nn.softmax(action_logits)
         optimal_action = tf.argmax(action_probas, axis=-1).numpy()[0]
@@ -90,18 +88,16 @@ def main():
     iteration = 1
 
     while True:
+        initial_state, _ = env.reset()
         with tf.GradientTape() as tape:
-            initial_state, _ = env.reset()
-            initial_state = tf.constant(initial_state, tf.float32)
             actions_probas, values, rewards = play_episode(initial_state, model)
-            actor_loss = - tf.reduce_mean((rewards - values) * tf.math.log(actions_probas))
             discounted_rewards = discount_reward(rewards, gamma)
+            values = np.array(values)
+            actor_loss = - tf.reduce_mean((discounted_rewards - values) * tf.math.log(actions_probas))
             critic_loss = critic_loss_fn(discounted_rewards, values)
             loss = actor_loss + critic_loss
 
-        print("Loss", loss)
         grad = tape.gradient(loss, model.trainable_variables)
-        print("Grad", grad)
         optimizer.apply_gradients(zip(grad, model.trainable_variables))
 
 
