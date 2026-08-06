@@ -1,10 +1,10 @@
 import gymnasium as gym
+from gymnasium.wrappers import RecordVideo
 import ale_py
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 
-import cProfile
 import imageio
 from datetime import datetime
 from time import perf_counter
@@ -31,11 +31,19 @@ class Actor2Critic(keras.Model):
         x = self.shared_network(obs)
         return self.actor(x), self.critic(x)
 
-def env_step(action):
+def env_step(env, action):
     next_obs, reward, termiated, truncated, _ = env.step(action)
     return next_obs.astype(np.float32), np.array(reward, np.float32), np.array(termiated | truncated, np.int32)
 
-def play_episode(initial_state, model):
+@tf.function
+def play_step(obs, model):
+    action_logits, state_value = model(obs)
+    action = tf.random.categorical(action_logits, 1)[0, 0]
+    action_proba = tf.nn.softmax(action_logits)
+    return action, action_proba, state_value
+        
+
+def play_episode(env, initial_state, model):
     obs = initial_state
     actions_probas = []
     values = []
@@ -43,11 +51,9 @@ def play_episode(initial_state, model):
     i = 0
     while True:
         obs = tf.expand_dims(obs, 0)
-        action_logits, state_value = model(obs)
-        action = tf.random.categorical(action_logits, 1)[0, 0]
-        action_proba = tf.nn.softmax(action_logits)
-        obs, reward, done = env_step(action)
+        action, action_proba, state_value = play_step(obs, model)
 
+        obs, reward, done = env_step(env, action)
         actions_probas.append(action_proba[0, action])
         values.append(tf.squeeze(state_value))
         rewards.append(reward)
@@ -64,7 +70,7 @@ def discount_reward(rewards, gamma):
     return (discounted_reward - discounted_reward.mean()) / (discounted_reward.std() + 1e-8)
 
 def play_test_episode(test_env, model):
-    states, _ = test_env.reset(render_mode="rgb_array")
+    states, _ = test_env.reset()
     frames = []
     total_reward = 0
     while True:
@@ -81,35 +87,35 @@ def play_test_episode(test_env, model):
     return total_reward, frames
 
 def full_train_step(env, model, critic_loss_fn, optimizer, gamma):
-            initial_state, _ = env.reset()
-            with tf.GradientTape() as tape:
-                actions_probas, values, rewards = play_episode(initial_state, model)
-                discounted_rewards = discount_reward(rewards, gamma)
-                values = np.array(values)
-                actor_loss = - tf.reduce_mean((discounted_rewards - values) * tf.math.log(actions_probas))
-                critic_loss = critic_loss_fn(discounted_rewards, values)
-                loss = actor_loss + critic_loss
+        initial_state, _ = env.reset()
+        with tf.GradientTape() as tape:
+            actions_probas, values, rewards = play_episode(env, initial_state, model)
+            discounted_rewards = discount_reward(rewards, gamma)
+            values = np.array(values)
+            actor_loss = - tf.reduce_mean((discounted_rewards - values) * tf.math.log(actions_probas))
+            critic_loss = critic_loss_fn(discounted_rewards, values)
+            loss = actor_loss + critic_loss
 
-            grad = tape.gradient(loss, model.trainable_variables)
-            optimizer.apply_gradients(zip(grad, model.trainable_variables))
+        grad = tape.gradient(loss, model.trainable_variables)
+        optimizer.apply_gradients(zip(grad, model.trainable_variables))
 
-            return loss, actor_loss, critic_loss
+        return loss, actor_loss, critic_loss
 
 def main():
 
     gym.register_envs(ale_py)
     env = gym.make("ALE/BattleZone-v5")
-    
-    test_env = gym.make("ALE/BattleZone-v5")
+    test_env = gym.make("ALE/BattleZone-v5", render_mode="rgb_array")
+
     model = Actor2Critic(env.observation_space.shape, 18)
     gamma = 0.99
     reward_threhold = 3000
 
     critic_loss_fn = keras.losses.Huber()
-    optimizer = keras.optimizers.Nadam()
+    optimizer = keras.optimizers.Nadam(global_clipnorm=0.5)
 
     current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
-    train_logs_dir = "/logs/A2C/BattleZone/train" + current_time
+    train_logs_dir = "logs/A2C/BattleZone/train" + current_time
     test_logs_dir = "logs/A2C/BattleZone/test" + current_time
 
     train_summary_writer = tf.summary.create_file_writer(train_logs_dir)
@@ -117,7 +123,6 @@ def main():
 
     iteration = 1
     try:
-        print(cProfile.run(full_train_step(env, model, critic_loss_fn, optimizer, gamma))) 
         while True:
             start = perf_counter()
             loss, actor_loss, critic_loss = full_train_step(env, model, critic_loss_fn, optimizer, gamma)
@@ -128,7 +133,7 @@ def main():
                 tf.summary.scalar("loss", loss, step=iteration)
                 tf.summary.scalar("iteration_time", end - start, step=iteration)
 
-            if iteration % 1000 == 0:
+            if iteration % 500 == 0:
                 test_reward , frames = play_test_episode(test_env, model)
                 imageio.mimsave(f"BattleZone-{iteration}.gif", frames, fps=30)
             
@@ -145,6 +150,7 @@ def main():
         pass
     finally:
         env.close()
+        test_env.close()
 
 if __name__ == "__main__":
     main()
