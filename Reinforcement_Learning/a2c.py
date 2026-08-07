@@ -41,7 +41,7 @@ class Agent:
         self.gamma = gamma
 
     def env_step(self, action: tf.Tensor) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        def _env_step():
+        def _env_step(action):
             next_state, reward, termiated, truncated, _ = self.env.step(action)
             return next_state.astype(np.float32), np.array(reward, np.float32), np.array(termiated | truncated, np.bool)
         return tf.numpy_function(
@@ -56,7 +56,7 @@ class Agent:
         action_probas = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
         state_values = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
         rewards = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
-        iteration = tf.Variable(0, dtype=tf.int32)
+        iteration = 0
         while tf.constant(True):
             state = tf.expand_dims(state, axis=0)
             action_logits, state_value = self.model(state)
@@ -70,7 +70,7 @@ class Agent:
 
             state.set_shape(initial_shape)
 
-            iteration.assign_add(1)
+            iteration += 1
  
             if done:
                 break
@@ -83,6 +83,7 @@ class Agent:
 
 
     def compute_returns(self, episode_rewards: tf.Tensor, gamma: float) -> tf.Tensor:
+        episode_rewards = tf.ensure_shape(episode_rewards, [None])
         reversed_rewards = tf.reverse(episode_rewards, axis=[0])
         discounted_reversed = tf.scan(
             fn=lambda acc, r: r + gamma * acc,
@@ -113,7 +114,7 @@ class Agent:
 
     def learn_from_episode(self):
         initial_state, _ = self.env.reset()
-        initial_state = tf.constant(initial_state, dtype=tf.float32) / 255.0
+        initial_state = tf.constant(initial_state, dtype=tf.float32)
         start = perf_counter()
         episode_reward, loss, actor_loss, critic_loss = self.train_step(initial_state)
         end = perf_counter()
