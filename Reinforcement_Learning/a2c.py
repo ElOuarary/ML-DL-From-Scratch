@@ -1,5 +1,5 @@
 import gymnasium as gym
-from gymnasium.wrappers import RecordVideo
+# from gymnasium.wrappers import RecordVideo
 import ale_py
 import numpy as np
 import tensorflow as tf
@@ -8,9 +8,10 @@ from tensorflow import keras
 import imageio
 from datetime import datetime
 from time import perf_counter
+from typing import Tuple
 
 class Actor2Critic(keras.Model):
-    def __init__(self, observation_space, action_space):
+    def __init__(self, observation_space: int, action_space: int):
         super().__init__()
         self.shared_network = keras.models.Sequential([
             keras.layers.InputLayer(observation_space),
@@ -26,93 +27,121 @@ class Actor2Critic(keras.Model):
         self.actor = keras.layers.Dense(action_space)
         self.critic = keras.layers.Dense(1)
 
-    @tf.function
-    def call(self, obs):
+    def call(self, obs: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
         x = self.shared_network(obs)
         return self.actor(x), self.critic(x)
 
-def env_step(env, action):
-    next_obs, reward, termiated, truncated, _ = env.step(action)
-    return next_obs.astype(np.float32), np.array(reward, np.float32), np.array(termiated | truncated, np.int32)
+class Agent:
+    def __init__(self, env, test_env, model, optimizer, critic_loss_fn, gamma):
+        self.env = env
+        self.test_env = test_env
+        self.model = model
+        self.critic_loss_fn = critic_loss_fn
+        self.optimizer = optimizer
+        self.gamma = gamma
 
-@tf.function
-def play_step(obs, model):
-    action_logits, state_value = model(obs)
-    action = tf.random.categorical(action_logits, 1)[0, 0]
-    action_proba = tf.nn.softmax(action_logits)
-    return action, action_proba, state_value
+    @tf.numpy_function(Tout=[tf.float32, tf.float32, tf.bool])
+    def env_step(self, action):
+        next_state, reward, termiated, truncated, _ = self.env.step(action)
+        return next_state.astype(np.float32), np.array(reward, np.float32), np.array(termiated | truncated, np.bool)
+
+    def play_episode(self, initial_state: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+        state = initial_state
+        initial_shape = initial_state.shape
+        action_probas = tf.TensorArray(dtype=tf.float32, dynamic_size=True)
+        state_values = tf.TensorArray(dtype=tf.float32, dynamic_size=True)
+        rewards = tf.TensorArray(dtype=tf.float32, dynamic_size=True)
+        iteration = tf.Variable(0, dtype=tf.int16)
+        while tf.constant(True):
+            state = tf.expand_dims(state, axis=0)
+            action_logits, state_value = self.model(state)
+            action = tf.random.categorical(action_logits, 1)[0, 0]
+            action_proba = tf.nn.log_softmax(action_logits)
+            state, reward, done = self.env_step(action)
+
+            action_probas = action_probas.write(iteration, action_proba[0, action])
+            state_values = state_values.write(iteration, tf.squeeze(state_value))
+            rewards = rewards.write(iteration, reward)
+
+            state.set_shape(initial_shape)
+ 
+            if done:
+                break
+
+        action_probas = tf.expand_dims(action_probas.stack())
+        state_values = tf.expand_dims(state_values.stack())
+        rewards = rewards.stack()
         
+        return action_probas, state_values, rewards
 
-def play_episode(env, initial_state, model):
-    obs = initial_state
-    actions_probas = []
-    values = []
-    rewards = []
-    i = 0
-    while True:
-        obs = tf.expand_dims(obs, 0)
-        action, action_proba, state_value = play_step(obs, model)
 
-        obs, reward, done = env_step(env, action)
-        actions_probas.append(action_proba[0, action])
-        values.append(tf.squeeze(state_value))
-        rewards.append(reward)
-        if done:
-            break
-        i += 1
+    def compute_returns(self, episode_rewards: tf.Tensor, gamma: float) -> tf.Tensor:
+        reversed_rewards = tf.reverse(episode_rewards)
+        disocunted_reveresed = tf.scan(
+            fn=lambda acc, r: r + gamma * acc,
+            elems=reversed_rewards,
+            intializer=tf.constant(0, dtype=tf.float32)
+        )
+        discounted = tf.reverse(disocunted_reveresed)
+        mean = tf.reduce_mean(discounted)
+        std = tf.math.reduce_mean(discounted)
+        return (discounted - mean) / (std + 1e-8)
+    
+    def compute_loss(self, action_probas: tf.Tensor, state_values: tf.Tensor, returns: tf.Tenosr) -> tf.Tensor:
+        action_loss = - tf.reduce_mean((state_values - returns) * action_probas)
+        value_loss = self.critic_loss_fn(returns, state_values)
+        return action_loss + value_loss, action_loss, value_loss
 
-    return actions_probas, values, rewards
-
-def discount_reward(rewards, gamma):
-    discounted_reward = np.array(rewards)
-    for i in range(len(rewards) - 2, -1, -1):
-        discounted_reward[i] += gamma * discounted_reward[i+1]
-    return (discounted_reward - discounted_reward.mean()) / (discounted_reward.std() + 1e-8)
-
-def play_test_episode(test_env, model):
-    states, _ = test_env.reset()
-    frames = []
-    total_reward = 0
-    while True:
-        frame = test_env.render()
-        frames.append(frame)
-        states = tf.constant(states[np.newaxis])
-        action_logits, _ = model(states)
-        action_probas = tf.nn.softmax(action_logits)
-        optimal_action = tf.argmax(action_probas, axis=-1).numpy()[0]
-        states, reward, terminated, truncated, _ = test_env.step(optimal_action)
-        total_reward += reward
-        if terminated or truncated:
-            break
-    return total_reward, frames
-
-def full_train_step(env, model, critic_loss_fn, optimizer, gamma):
-        initial_state, _ = env.reset()
+    @tf.function
+    def train_step(self, initial_state: tf.Tensor):
         with tf.GradientTape() as tape:
-            actions_probas, values, rewards = play_episode(env, initial_state, model)
-            discounted_rewards = discount_reward(rewards, gamma)
-            values = np.array(values)
-            actor_loss = - tf.reduce_mean((discounted_rewards - values) * tf.math.log(actions_probas))
-            critic_loss = critic_loss_fn(discounted_rewards, values)
-            loss = actor_loss + critic_loss
+            action_probas, state_values, rewards = self.play_episode(initial_state)
+            returns = self.compute_returns(rewards, self.gamma)
+            loss, action_loss, value_loss = self.compute_loss(action_probas, state_values, returns)
 
-        grad = tape.gradient(loss, model.trainable_variables)
-        optimizer.apply_gradients(zip(grad, model.trainable_variables))
+        grads = tape.gradient(loss, self.model.trainable_variables)
+        self.optimizer.apply(grads)
 
-        return loss, actor_loss, critic_loss
+        episode_reward = tf.reduce_sum(rewards)
+        return episode_reward, loss, action_loss, value_loss
 
+    def test(self):
+        states, _ = self.test_env.reset()
+        frames = []
+        total_reward = 0
+        while True:
+            frame = self.test_env.render()
+            frames.append(frame)
+            states = tf.constant(states[np.newaxis])
+            action_logits, _ = self.model(states)
+            action_probas = tf.nn.softmax(action_logits)
+            optimal_action = tf.argmax(action_probas, axis=-1).numpy()[0]
+            states, reward, terminated, truncated, _ = self.test_env.step(optimal_action)
+            total_reward += reward
+            if terminated or truncated:
+                break
+        return total_reward, frames
+
+    def learn_from_episode(self):
+        initial_state, _ = self.env.reset()
+        initial_state = tf.constant(initial_state, dtype=tf.float32) / 255
+        start = perf_counter()
+        episode_reward, loss, critic_loss, actor_loss  = self.train(initial_state)
+        end = perf_counter()
+        return episode_reward, loss, critic_loss, actor_loss, end - start
+    
 def main():
-
     gym.register_envs(ale_py)
     env = gym.make("ALE/BattleZone-v5")
     test_env = gym.make("ALE/BattleZone-v5", render_mode="rgb_array")
-
     model = Actor2Critic(env.observation_space.shape, 18)
     gamma = 0.99
-    reward_threhold = 3000
 
     critic_loss_fn = keras.losses.Huber()
     optimizer = keras.optimizers.Nadam(global_clipnorm=0.5)
+
+    agent = Agent(env, test_env, model, optimizer, critic_loss_fn, gamma)
+    reward_threhold = 3000
 
     current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
     train_logs_dir = "logs/A2C/BattleZone/train" + current_time
@@ -121,20 +150,20 @@ def main():
     train_summary_writer = tf.summary.create_file_writer(train_logs_dir)
     test_summary_writer = tf.summary.create_file_writer(test_logs_dir)
 
-    iteration = 1
+    iteration = 0
     try:
         while True:
-            start = perf_counter()
-            loss, actor_loss, critic_loss = full_train_step(env, model, critic_loss_fn, optimizer, gamma)
-            end = perf_counter()
+            episode_reward, loss, actor_loss, critic_loss, iteration_time = agent.learn_from_episode()
+
             with train_summary_writer.as_default():
+                tf.summary.scalar("train reward", episode_reward, step=iteration)
                 tf.summary.scalar("actor loss", actor_loss, step=iteration)
                 tf.summary.scalar("critic loss", critic_loss, step=iteration)
                 tf.summary.scalar("loss", loss, step=iteration)
-                tf.summary.scalar("iteration_time", end - start, step=iteration)
+                tf.summary.scalar("iteration_time", iteration_time, step=iteration)
 
             if iteration % 500 == 0:
-                test_reward , frames = play_test_episode(test_env, model)
+                test_reward , frames = agent.test()
                 imageio.mimsave(f"BattleZone-{iteration}.gif", frames, fps=30)
             
                 with test_summary_writer.as_default():
