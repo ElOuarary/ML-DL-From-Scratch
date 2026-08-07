@@ -40,18 +40,23 @@ class Agent:
         self.optimizer = optimizer
         self.gamma = gamma
 
-    @tf.numpy_function(Tout=[tf.float32, tf.float32, tf.bool])
-    def env_step(self, action):
-        next_state, reward, termiated, truncated, _ = self.env.step(action)
-        return next_state.astype(np.float32), np.array(reward, np.float32), np.array(termiated | truncated, np.bool)
+    def env_step(self, action: tf.Tensor) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        def _env_step():
+            next_state, reward, termiated, truncated, _ = self.env.step(action)
+            return next_state.astype(np.float32), np.array(reward, np.float32), np.array(termiated | truncated, np.bool)
+        return tf.numpy_function(
+            func=_env_step,
+            inp=[action],
+            Tout=[tf.float32, tf.float32, tf.bool]
+        )
 
     def play_episode(self, initial_state: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
         state = initial_state
         initial_shape = initial_state.shape
-        action_probas = tf.TensorArray(dtype=tf.float32, dynamic_size=True)
-        state_values = tf.TensorArray(dtype=tf.float32, dynamic_size=True)
-        rewards = tf.TensorArray(dtype=tf.float32, dynamic_size=True)
-        iteration = tf.Variable(0, dtype=tf.int16)
+        action_probas = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
+        state_values = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
+        rewards = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
+        iteration = tf.Variable(0, dtype=tf.int32)
         while tf.constant(True):
             state = tf.expand_dims(state, axis=0)
             action_logits, state_value = self.model(state)
@@ -64,30 +69,32 @@ class Agent:
             rewards = rewards.write(iteration, reward)
 
             state.set_shape(initial_shape)
+
+            iteration.assign_add(1)
  
             if done:
                 break
 
-        action_probas = tf.expand_dims(action_probas.stack())
-        state_values = tf.expand_dims(state_values.stack())
+        action_probas = tf.expand_dims(action_probas.stack(), axis=0)
+        state_values = tf.expand_dims(state_values.stack(), axis=0)
         rewards = rewards.stack()
         
         return action_probas, state_values, rewards
 
 
     def compute_returns(self, episode_rewards: tf.Tensor, gamma: float) -> tf.Tensor:
-        reversed_rewards = tf.reverse(episode_rewards)
-        disocunted_reveresed = tf.scan(
+        reversed_rewards = tf.reverse(episode_rewards, axis=[0])
+        discounted_reversed = tf.scan(
             fn=lambda acc, r: r + gamma * acc,
             elems=reversed_rewards,
-            intializer=tf.constant(0, dtype=tf.float32)
+            initializer=tf.constant(0, dtype=tf.float32)
         )
-        discounted = tf.reverse(disocunted_reveresed)
+        discounted = tf.reverse(discounted_reversed, axis=[0])
         mean = tf.reduce_mean(discounted)
-        std = tf.math.reduce_mean(discounted)
+        std = tf.math.reduce_std(discounted)
         return (discounted - mean) / (std + 1e-8)
     
-    def compute_loss(self, action_probas: tf.Tensor, state_values: tf.Tensor, returns: tf.Tenosr) -> tf.Tensor:
+    def compute_loss(self, action_probas: tf.Tensor, state_values: tf.Tensor, returns: tf.Tensor) -> tf.Tensor:
         action_loss = - tf.reduce_mean((state_values - returns) * action_probas)
         value_loss = self.critic_loss_fn(returns, state_values)
         return action_loss + value_loss, action_loss, value_loss
@@ -100,10 +107,17 @@ class Agent:
             loss, action_loss, value_loss = self.compute_loss(action_probas, state_values, returns)
 
         grads = tape.gradient(loss, self.model.trainable_variables)
-        self.optimizer.apply(grads)
+        self.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
 
-        episode_reward = tf.reduce_sum(rewards)
-        return episode_reward, loss, action_loss, value_loss
+        return tf.reduce_sum(rewards), loss, action_loss, value_loss
+
+    def learn_from_episode(self):
+        initial_state, _ = self.env.reset()
+        initial_state = tf.constant(initial_state, dtype=tf.float32) / 255.0
+        start = perf_counter()
+        episode_reward, loss, actor_loss, critic_loss = self.train_step(initial_state)
+        end = perf_counter()
+        return episode_reward, loss, actor_loss, critic_loss, end - start
 
     def test(self):
         states, _ = self.test_env.reset()
@@ -121,15 +135,7 @@ class Agent:
             if terminated or truncated:
                 break
         return total_reward, frames
-
-    def learn_from_episode(self):
-        initial_state, _ = self.env.reset()
-        initial_state = tf.constant(initial_state, dtype=tf.float32) / 255
-        start = perf_counter()
-        episode_reward, loss, critic_loss, actor_loss  = self.train(initial_state)
-        end = perf_counter()
-        return episode_reward, loss, critic_loss, actor_loss, end - start
-    
+        
 def main():
     gym.register_envs(ale_py)
     env = gym.make("ALE/BattleZone-v5")
