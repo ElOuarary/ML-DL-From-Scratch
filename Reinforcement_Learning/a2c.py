@@ -16,7 +16,7 @@ class MetricLog:
     def __init__(self, path="metrics.csv"):
         self.path = path
         self.process = psutil.Process(os.getpid())
-        with open(path, "w") as f:
+        with open(self.path, "w") as f:
             writer = csv.writer(f)
             writer.writerow([
                 "iteration", "step_time_s", "rss_mb", "cpu_percent"
@@ -42,7 +42,6 @@ class Actor2Critic(keras.Model):
             keras.layers.MaxPool2D(),
             keras.layers.Conv2D(64, kernel_size=3, strides=1, activation="relu"),
             keras.layers.Flatten(),
-            keras.layers.Dense(256, activation="relu"),
             keras.layers.Dense(256, activation="relu")
         ])
         self.actor = keras.layers.Dense(action_space)
@@ -75,7 +74,7 @@ class Agent:
             action = self.predict(state)
             next_state, reward, terminated, truncated, _  = self.env.step(action.numpy())
 
-            states.append(state)
+            states.append(state[0])
             actions.append(action)
             rewards.append(reward)
             
@@ -84,12 +83,14 @@ class Agent:
 
             state = next_state
 
-        return np.asarray(states), np.asarray(actions), np.asarray(rewards, dtype=np.float32)
+        return np.asarray(states, dtype=np.float32), np.asarray(actions, dtype=np.int32), np.asarray(rewards, dtype=np.float32)
 
-    def compute_returns(self, episode_rewards: np.ndarray) -> np.ndarray:
-        returns = lfilter([1], [1, - 0.99], episode_rewards[::-1])[::-1]
-        mean = returns.mean()
-        std = returns.std()
+    def compute_returns(self, episode_rewards: tf.Tensor) -> tf.Tensor:
+        n = tf.shape(episode_rewards)[0]
+        discount = 0.99 ** tf.cast(tf.range(n), dtype=tf.float32)
+        returns = tf.cumsum(tf.reverse(episode_rewards * discount, axis=[0]))
+        mean = tf.reduce_mean(returns)
+        std = tf.math.reduce_std(returns)
         return (returns - mean) / (std + 1e-8)
     
     def compute_loss(self, action_probas: tf.Tensor, state_values: tf.Tensor, returns: tf.Tensor) -> tf.Tensor:
@@ -97,25 +98,23 @@ class Agent:
         value_loss = self.critic_loss_fn(returns, state_values)
         return action_loss + value_loss, action_loss, value_loss
 
-    @tf.function
-    def train_step(self, states: tf.Tensor, actions: tf.Tensor, discounted_rewards: tf.Tensor):
-        batch_states = tf.squeeze(states)
+    @tf.function(input_signature=[tf.TensorSpec(shape=(None, 210, 160, 3), dtype=tf.float32), tf.TensorSpec(shape=(1000,), dtype=tf.int32), tf.TensorSpec(shape=(1000,), dtype=tf.float32)])
+    def train_step(self, states: tf.Tensor, actions: tf.Tensor, rewards: tf.Tensor):
+        discounted_rewards = self.compute_returns(rewards)
         with tf.GradientTape() as tape:
-            action_logits, state_values = self.model(batch_states)
+            action_logits, state_values = self.model(states)
             action_probas = tf.gather(tf.nn.log_softmax(action_logits), actions, batch_dims=1)
             loss, actor_loss, critic_loss = self.compute_loss(action_probas, state_values, discounted_rewards)
 
         grads = tape.gradient(loss, self.model.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
 
-        return tf.reduce_sum(discounted_rewards), loss, actor_loss, critic_loss
+        return tf.reduce_sum(rewards), loss, actor_loss, critic_loss
 
     def learn_from_episode(self):
         states, actions, rewards = self.collect_episode()
-        actions_return = self.compute_returns(rewards)
-        states, actions, actions_return = tf.constant(states, dtype=tf.float32), tf.constant(actions, dtype=tf.int32), tf.constant(actions_return, dtype=tf.float32)
         start = perf_counter()
-        episode_reward, loss, actor_loss, critic_loss = self.train_step(states, actions, actions_return)
+        episode_reward, loss, actor_loss, critic_loss = self.train_step(states, actions, rewards)
         end = perf_counter()
         return episode_reward, loss, actor_loss, critic_loss, end - start
 
