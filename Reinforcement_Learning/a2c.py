@@ -42,6 +42,7 @@ class Actor2Critic(keras.Model):
             keras.layers.MaxPool2D(),
             keras.layers.Conv2D(64, kernel_size=3, strides=1, activation="relu"),
             keras.layers.Flatten(),
+            keras.layers.Dense(256, activation="relu"),
             keras.layers.Dense(256, activation="relu")
         ])
         self.actor = keras.layers.Dense(action_space)
@@ -98,9 +99,12 @@ class Agent:
         value_loss = self.critic_loss_fn(returns, state_values)
         return action_loss + value_loss, action_loss, value_loss
 
-    @tf.function(input_signature=[tf.TensorSpec(shape=(None, 210, 160, 3), dtype=tf.float32), tf.TensorSpec(shape=(1000,), dtype=tf.int32), tf.TensorSpec(shape=(1000,), dtype=tf.float32)])
-    def train_step(self, states: tf.Tensor, actions: tf.Tensor, rewards: tf.Tensor):
-        discounted_rewards = self.compute_returns(rewards)
+    @tf.function(input_signature=[
+        tf.TensorSpec(shape=(None, 210, 160, 3), dtype=tf.float32),
+        tf.TensorSpec(shape=(100,), dtype=tf.int32),
+        tf.TensorSpec(shape=(100,), dtype=tf.float32)
+    ])
+    def train_step(self, states: tf.Tensor, actions: tf.Tensor, discounted_rewards: tf.Tensor):
         with tf.GradientTape() as tape:
             action_logits, state_values = self.model(states)
             action_probas = tf.gather(tf.nn.log_softmax(action_logits), actions, batch_dims=1)
@@ -109,14 +113,20 @@ class Agent:
         grads = tape.gradient(loss, self.model.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
 
-        return tf.reduce_sum(rewards), loss, actor_loss, critic_loss
+        return loss, actor_loss, critic_loss 
 
     def learn_from_episode(self):
         states, actions, rewards = self.collect_episode()
         start = perf_counter()
-        episode_reward, loss, actor_loss, critic_loss = self.train_step(states, actions, rewards)
+        discounted_rewards = self.compute_returns(rewards)
+        acc_loss, acc_actor_loss, acc_critic_loss = 0, 0, 0
+        for i in range(0, 1000, 128):
+            loss, actor_loss, critic_loss = self.train_step(states[i: i+100], actions[i: i+100], discounted_rewards[i: i+100])
+            acc_loss += loss
+            acc_actor_loss += actor_loss
+            acc_critic_loss += critic_loss
         end = perf_counter()
-        return episode_reward, loss, actor_loss, critic_loss, end - start
+        return np.sum(discounted_rewards), acc_loss, acc_actor_loss, acc_critic_loss, end - start
 
     def test(self):
         states, _ = self.test_env.reset()
@@ -144,7 +154,7 @@ def main():
     gamma = 0.99
 
     critic_loss_fn = keras.losses.Huber()
-    optimizer = keras.optimizers.Nadam(global_clipnorm=0.5)
+    optimizer = keras.optimizers.Nadam(learning_rate=0.0005, global_clipnorm=1)
 
     agent = Agent(env, test_env, model, optimizer, critic_loss_fn, gamma)
     reward_threhold = 3000
@@ -152,27 +162,41 @@ def main():
     current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
     train_logs_dir = "logs/A2C/BattleZone/train" + current_time
     test_logs_dir = "logs/A2C/BattleZone/test" + current_time
+    logdir = "logs/A2C/BattleZone/func/" + current_time
 
     train_summary_writer = tf.summary.create_file_writer(train_logs_dir)
     test_summary_writer = tf.summary.create_file_writer(test_logs_dir)
+    writer = tf.summary.create_file_writer(logdir)
+
+    tf.summary.trace_on(graph=True)
+    tf.profiler.experimental.start(logdir)
 
     iteration = 0
     try:
         while True:
-            start = perf_counter()
             episode_reward, loss, actor_loss, critic_loss, iteration_time = agent.learn_from_episode()
-            iteration_step = perf_counter() - start
-            metrics.log(iteration, iteration_step)
-            with train_summary_writer.as_default():
-                tf.summary.scalar("train reward", episode_reward, step=iteration)
-                tf.summary.scalar("actor loss", actor_loss, step=iteration)
-                tf.summary.scalar("critic loss", critic_loss, step=iteration)
-                tf.summary.scalar("loss", loss, step=iteration)
-                tf.summary.scalar("iteration_time", iteration_time, step=iteration)
 
-            if iteration % 500 == 0:
+            if iteration == 0:
+                with writer.as_default():
+                    tf.summary.trace_export(
+                        name="A2C_BattleZone_NN",
+                        step=0,
+                        profiler_outdir=logdir
+                    )
+
+            if iteration % 100 == 0:
                 test_reward , frames = agent.test()
                 imageio.mimsave(f"BattleZone-{iteration}.gif", frames, fps=30)
+
+                metrics.log(iteration, iteration_time)
+
+                with train_summary_writer.as_default():
+                    tf.summary.scalar("train reward", episode_reward, step=iteration)
+                    tf.summary.scalar("actor loss", actor_loss, step=iteration)
+                    tf.summary.scalar("critic loss", critic_loss, step=iteration)
+                    tf.summary.scalar("loss", loss, step=iteration)
+                    tf.summary.scalar("iteration_time", iteration_time, step=iteration)
+                
             
                 with test_summary_writer.as_default():
                     tf.summary.scalar("test reward", test_reward, step=iteration)
