@@ -2,13 +2,15 @@ import gymnasium as gym
 # from gymnasium.wrappers import RecordVideo
 import ale_py
 import numpy as np
-from scipy.signal import lfilter
 import tensorflow as tf
 from tensorflow import keras
+import tqdm
 
 import imageio
 from datetime import datetime
+import gc
 import psutil, os, csv
+from collections import deque
 from time import perf_counter
 from typing import Tuple
 
@@ -80,12 +82,13 @@ class Agent:
             rewards.append(reward)
             
             if terminated or truncated:
-                state, _ = self.env.reset()
+                break
 
             state = next_state
-
         return np.asarray(states, dtype=np.float32), np.asarray(actions, dtype=np.int32), np.asarray(rewards, dtype=np.float32)
 
+    # Maybe I'm discounting the wrong way and that the current action should only get critited for the next fixed action not all actions in the future
+    # Something weird on how the value is computed review the chapter
     def compute_returns(self, episode_rewards: tf.Tensor) -> tf.Tensor:
         n = tf.shape(episode_rewards)[0]
         discount = 0.99 ** tf.cast(tf.range(n), dtype=tf.float32)
@@ -93,7 +96,8 @@ class Agent:
         mean = tf.reduce_mean(returns)
         std = tf.math.reduce_std(returns)
         return (returns - mean) / (std + 1e-8)
-    
+
+    # Possibility to include the entropy loss to improve training and agent action's selection
     def compute_loss(self, action_probas: tf.Tensor, state_values: tf.Tensor, returns: tf.Tensor) -> tf.Tensor:
         action_loss = - tf.reduce_mean((returns - state_values) * action_probas)
         value_loss = self.critic_loss_fn(returns, state_values)
@@ -101,32 +105,29 @@ class Agent:
 
     @tf.function(input_signature=[
         tf.TensorSpec(shape=(None, 210, 160, 3), dtype=tf.float32),
-        tf.TensorSpec(shape=(100,), dtype=tf.int32),
-        tf.TensorSpec(shape=(100,), dtype=tf.float32)
+        tf.TensorSpec(shape=(None,), dtype=tf.int32),
+        tf.TensorSpec(shape=(None,), dtype=tf.float32)
     ])
-    def train_step(self, states: tf.Tensor, actions: tf.Tensor, discounted_rewards: tf.Tensor):
+    def train_step(self, states: tf.Tensor, actions: tf.Tensor, returns: tf.Tensor):
+        returns = tf.expand_dims(returns, axis=1)
         with tf.GradientTape() as tape:
             action_logits, state_values = self.model(states)
             action_probas = tf.gather(tf.nn.log_softmax(action_logits), actions, batch_dims=1)
-            loss, actor_loss, critic_loss = self.compute_loss(action_probas, state_values, discounted_rewards)
+            loss, actor_loss, critic_loss = self.compute_loss(action_probas, state_values, returns)
 
         grads = tape.gradient(loss, self.model.trainable_variables)
+        # Optimize on actor loss and critic loss seperately
         self.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
 
         return loss, actor_loss, critic_loss 
 
     def learn_from_episode(self):
-        states, actions, rewards = self.collect_episode()
         start = perf_counter()
+        states, actions, rewards = self.collect_episode()
         discounted_rewards = self.compute_returns(rewards)
-        acc_loss, acc_actor_loss, acc_critic_loss = 0, 0, 0
-        for i in range(0, 1000, 128):
-            loss, actor_loss, critic_loss = self.train_step(states[i: i+100], actions[i: i+100], discounted_rewards[i: i+100])
-            acc_loss += loss
-            acc_actor_loss += actor_loss
-            acc_critic_loss += critic_loss
+        loss, actor_loss, critic_loss = self.train_step(states, actions, discounted_rewards)
         end = perf_counter()
-        return np.sum(discounted_rewards), acc_loss, acc_actor_loss, acc_critic_loss, end - start
+        return np.sum(rewards), loss, actor_loss, critic_loss, end - start
 
     def test(self):
         states, _ = self.test_env.reset()
@@ -154,7 +155,7 @@ def main():
     gamma = 0.99
 
     critic_loss_fn = keras.losses.Huber()
-    optimizer = keras.optimizers.Nadam(learning_rate=0.0005, global_clipnorm=1)
+    optimizer = keras.optimizers.Nadam(learning_rate=0.0015, clipnorm=0.1)
 
     agent = Agent(env, test_env, model, optimizer, critic_loss_fn, gamma)
     reward_threhold = 3000
@@ -162,31 +163,35 @@ def main():
     current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
     train_logs_dir = "logs/A2C/BattleZone/train" + current_time
     test_logs_dir = "logs/A2C/BattleZone/test" + current_time
-    logdir = "logs/A2C/BattleZone/func/" + current_time
+    # logdir = "logs/A2C/BattleZone/func/" + current_time
 
     train_summary_writer = tf.summary.create_file_writer(train_logs_dir)
     test_summary_writer = tf.summary.create_file_writer(test_logs_dir)
-    writer = tf.summary.create_file_writer(logdir)
+    # writer = tf.summary.create_file_writer(logdir)
 
     tf.summary.trace_on(graph=True)
-    tf.profiler.experimental.start(logdir)
-
-    iteration = 0
+    # tf.profiler.experimental.start(logdir)
+    
+    episodes_reward: deque = deque(maxlen=100)
     try:
-        while True:
+        t = tqdm.trange(8000)
+        for iteration in t:
             episode_reward, loss, actor_loss, critic_loss, iteration_time = agent.learn_from_episode()
-
-            if iteration == 0:
-                with writer.as_default():
-                    tf.summary.trace_export(
-                        name="A2C_BattleZone_NN",
-                        step=0,
-                        profiler_outdir=logdir
-                    )
+            t.set_postfix(episode_reward=episode_reward, running_reward=np.mean(episodes_reward))
+            # if iteration == 0:
+            #     with writer.as_default():
+            #         tf.summary.trace_export(
+            #             name="A2C_BattleZone_NN",
+            #             step=0,
+            #             profiler_outdir=logdir
+            #         )
+            #     tf.summary.trace_off()
 
             if iteration % 100 == 0:
                 test_reward , frames = agent.test()
                 imageio.mimsave(f"BattleZone-{iteration}.gif", frames, fps=30)
+                del frames
+                gc.collect()
 
                 metrics.log(iteration, iteration_time)
 
