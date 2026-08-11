@@ -111,21 +111,42 @@ class Agent:
     def train_step(self, states: tf.Tensor, actions: tf.Tensor, returns: tf.Tensor):
         returns = tf.expand_dims(returns, axis=1)
         with tf.GradientTape() as tape:
-            action_logits, state_values = self.model(states)
-            action_probas = tf.gather(tf.nn.log_softmax(action_logits), actions, batch_dims=1)
+            action_logits, state_values = self.model(states / 255.0)
+            action_probas = tf.expand_dims(tf.gather(tf.nn.log_softmax(action_logits), actions, batch_dims=1), axis=1)
             loss, actor_loss, critic_loss = self.compute_loss(action_probas, state_values, returns)
 
         grads = tape.gradient(loss, self.model.trainable_variables)
-        # Optimize on actor loss and critic loss seperately
-        self.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
+        return loss, actor_loss, critic_loss, grads
 
-        return loss, actor_loss, critic_loss 
+    @tf.function(input_signature=[
+        tf.TensorSpec(shape=(None, 210, 160, 3), dtype=tf.float32),
+        tf.TensorSpec(shape=(None,), dtype=tf.int32),
+        tf.TensorSpec(shape=(None,), dtype=tf.float32)
+    ])
+    def train_batch(self, states, actions, returns):
+        num_samples = tf.shape(states)[0]
+        batch_size = 100
+        num_batches = tf.constant(100, dtype=tf.float32)
+        accum_loss = tf.constant(0, dtype=tf.float32)
+        accum_actor_loss = tf.constant(0, dtype=tf.float32)
+        accum_critic_loss = tf.constant(0, dtype=tf.float32)
+        accum_grads = [tf.zeros_like(v) for v in self.model.trainable_variables]
+        for i in tf.range(0, num_samples, batch_size):
+            limit = tf.minimum(i + batch_size, num_samples)
+            loss, actor_loss, critic_loss, grads = self.train_step(states[i: limit], actions[i: limit], returns[i: limit])
+            accum_grads = [ag + g for ag, g in zip(accum_grads, grads)]
+            accum_loss += loss
+            accum_actor_loss += actor_loss
+            accum_critic_loss += critic_loss
+            num_batches += 1
+        self.optimizer.apply_gradients(zip(accum_grads, self.model.trainable_variables))
+        return accum_loss / num_batches, accum_actor_loss / num_batches, accum_critic_loss / num_batches
 
     def learn_from_episode(self):
         start = perf_counter()
         states, actions, rewards = self.collect_episode()
-        discounted_rewards = self.compute_returns(rewards)
-        loss, actor_loss, critic_loss = self.train_step(states, actions, discounted_rewards)
+        returns = self.compute_returns(rewards)
+        loss, actor_loss, critic_loss = self.train_batch(states, actions, returns)
         end = perf_counter()
         return np.sum(rewards), loss, actor_loss, critic_loss, end - start
 
@@ -177,6 +198,7 @@ def main():
         t = tqdm.trange(8000)
         for iteration in t:
             episode_reward, loss, actor_loss, critic_loss, iteration_time = agent.learn_from_episode()
+            episodes_reward.append(episode_reward)
             t.set_postfix(episode_reward=episode_reward, running_reward=np.mean(episodes_reward))
             # if iteration == 0:
             #     with writer.as_default():
@@ -187,7 +209,7 @@ def main():
             #         )
             #     tf.summary.trace_off()
 
-            if iteration % 200 == 0:
+            if iteration % 100 == 0:
                 test_reward , frames = agent.test()
                 imageio.mimsave(f"BattleZone-{iteration}.gif", frames, fps=30)
                 del frames
@@ -205,7 +227,6 @@ def main():
             
                 with test_summary_writer.as_default():
                     tf.summary.scalar("test reward", test_reward, step=iteration)
-                    print(f"Iteration {iteration} - Average Reward: {test_reward}")
 
                 if test_reward > reward_threhold:
                         print("Problem Solved!")
