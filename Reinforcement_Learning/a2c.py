@@ -187,7 +187,7 @@ def main():
             #         )
             #     tf.summary.trace_off()
 
-            if iteration % 100 == 0:
+            if iteration % 200 == 0:
                 test_reward , frames = agent.test()
                 imageio.mimsave(f"BattleZone-{iteration}.gif", frames, fps=30)
                 del frames
