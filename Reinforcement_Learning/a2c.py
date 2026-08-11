@@ -55,13 +55,14 @@ class Actor2Critic(keras.Model):
         return self.actor(x), self.critic(x)
 
 class Agent:
-    def __init__(self, env, test_env, model, optimizer, critic_loss_fn, gamma):
+    def __init__(self, env, test_env, model, optimizer, critic_loss_fn, gamma, batch_size):
         self.env = env
         self.test_env = test_env
         self.model = model
         self.critic_loss_fn = critic_loss_fn
         self.optimizer = optimizer
         self.gamma = gamma
+        self.batch_size = batch_size
 
     @tf.function
     def predict(self, state):
@@ -87,15 +88,11 @@ class Agent:
             state = next_state
         return np.asarray(states, dtype=np.float32), np.asarray(actions, dtype=np.int32), np.asarray(rewards, dtype=np.float32)
 
-    # Maybe I'm discounting the wrong way and that the current action should only get critited for the next fixed action not all actions in the future
-    # Something weird on how the value is computed review the chapter
-    def compute_returns(self, episode_rewards: tf.Tensor) -> tf.Tensor:
-        n = tf.shape(episode_rewards)[0]
-        discount = 0.99 ** tf.cast(tf.range(n), dtype=tf.float32)
-        returns = tf.cumsum(tf.reverse(episode_rewards * discount, axis=[0]))
-        mean = tf.reduce_mean(returns)
-        std = tf.math.reduce_std(returns)
-        return (returns - mean) / (std + 1e-8)
+    # Maybe the current action should only get critited for the next fixed action not all actions in the future
+    def compute_returns(self, episode_rewards: np.ndarray) -> np.ndarray:
+        for i in range(len(episode_rewards) - 2, -1, -1):
+            episode_rewards[i] += self.gamma * episode_rewards[i+1]
+        return episode_rewards
 
     # Possibility to include the entropy loss to improve training and agent action's selection
     def compute_loss(self, action_probas: tf.Tensor, state_values: tf.Tensor, returns: tf.Tensor) -> tf.Tensor:
@@ -111,7 +108,7 @@ class Agent:
     def train_step(self, states: tf.Tensor, actions: tf.Tensor, returns: tf.Tensor):
         returns = tf.expand_dims(returns, axis=1)
         with tf.GradientTape() as tape:
-            action_logits, state_values = self.model(states / 255.0)
+            action_logits, state_values = self.model(states)
             action_probas = tf.expand_dims(tf.gather(tf.nn.log_softmax(action_logits), actions, batch_dims=1), axis=1)
             loss, actor_loss, critic_loss = self.compute_loss(action_probas, state_values, returns)
 
@@ -121,18 +118,17 @@ class Agent:
     @tf.function(input_signature=[
         tf.TensorSpec(shape=(None, 210, 160, 3), dtype=tf.float32),
         tf.TensorSpec(shape=(None,), dtype=tf.int32),
-        tf.TensorSpec(shape=(None,), dtype=tf.float32)
+        tf.TensorSpec(shape=(None,), dtype=tf.float32),
+        tf.TensorSpec(shape=(), dtype=tf.float32),
+        tf.TensorSpec(shape=(), dtype=tf.float32),
+        tf.TensorSpec(shape=(), dtype=tf.float32),
+        tf.TensorSpec(shape=(), dtype=tf.int32),
     ])
-    def train_batch(self, states, actions, returns):
-        num_samples = tf.shape(states)[0]
-        batch_size = 100
-        num_batches = tf.constant(100, dtype=tf.float32)
-        accum_loss = tf.constant(0, dtype=tf.float32)
-        accum_actor_loss = tf.constant(0, dtype=tf.float32)
-        accum_critic_loss = tf.constant(0, dtype=tf.float32)
+    def train_batch(self, states, actions, returns, accum_loss, accum_actor_loss, accum_critic_loss, num_samples):
+        num_batches = tf.constant(0, dtype=tf.float32)
         accum_grads = [tf.zeros_like(v) for v in self.model.trainable_variables]
-        for i in tf.range(0, num_samples, batch_size):
-            limit = tf.minimum(i + batch_size, num_samples)
+        for i in tf.range(0, num_samples, self.batch_size):
+            limit = tf.minimum(i + self.batch_size, num_samples)
             loss, actor_loss, critic_loss, grads = self.train_step(states[i: limit], actions[i: limit], returns[i: limit])
             accum_grads = [ag + g for ag, g in zip(accum_grads, grads)]
             accum_loss += loss
@@ -146,7 +142,9 @@ class Agent:
         start = perf_counter()
         states, actions, rewards = self.collect_episode()
         returns = self.compute_returns(rewards)
-        loss, actor_loss, critic_loss = self.train_batch(states, actions, returns)
+        accum_loss, accum_actor_loss, accum_critic_loss, = np.array(0, dtype=np.float32), np.array(0, dtype=np.float32), np.array(0, dtype=np.float32)
+        num_samples = states.shape[0]
+        loss, actor_loss, critic_loss = self.train_batch(states, actions, returns, accum_loss, accum_actor_loss, accum_critic_loss, num_samples)
         end = perf_counter()
         return np.sum(rewards), loss, actor_loss, critic_loss, end - start
 
@@ -178,7 +176,7 @@ def main():
     critic_loss_fn = keras.losses.Huber()
     optimizer = keras.optimizers.Nadam(learning_rate=0.0015, clipnorm=0.1)
 
-    agent = Agent(env, test_env, model, optimizer, critic_loss_fn, gamma)
+    agent = Agent(env, test_env, model, optimizer, critic_loss_fn, gamma, 100)
     reward_threhold = 3000
 
     current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
