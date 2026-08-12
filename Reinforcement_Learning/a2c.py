@@ -1,5 +1,4 @@
 import gymnasium as gym
-from gymnasium.wrappers import AtariPreprocessing, FrameStackObservation
 # from gymnasium.wrappers import RecordVideo
 import ale_py
 import numpy as np
@@ -58,6 +57,7 @@ class Actor2Critic(keras.Model):
 class Agent:
     def __init__(self, env, test_env, model, optimizer, critic_loss_fn, gamma, batch_size):
         self.env = env
+        self.current_state, _ = env.reset()
         self.test_env = test_env
         self.model = model
         self.critic_loss_fn = critic_loss_fn
@@ -67,9 +67,43 @@ class Agent:
 
     @tf.function
     def predict(self, state):
-        action_logits, _ = self.model(state)
+        action_logits, state_value = self.model(state)
         action = tf.random.categorical(action_logits, num_samples=1)[0, 0]
-        return action
+        return action, state_value
+
+    def collect_rollout(self, n_steps=5) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        states, actions, rewards = [], [], []
+        state, _ = self.env.reset() if self.current_state is None else (self.current_state, None)
+
+        for _ in tf.range(n_steps):
+            state_transpose = np.transpose((state.astype(np.float32)), axes=[1, 2, 0])
+            action, _ = self.predict(state_transpose[np.newaxis])
+            next_state, reward, terminated, truncated, _ = self.env.step(action.numpy())
+
+            states.append(state_transpose)
+            actions.append(action)
+            rewards.append(reward)
+
+            state = next_state
+
+            if terminated or truncated:
+                self.current_state = None
+                break
+
+        if not (terminated or truncated):
+            next_state_norm = np.transpose(state.astype(np.float32), axes=[1, 2, 0])[np.newaxis]
+            _, boostrap_value = self.model(next_state_norm)
+            boostrap_value = boostrap_value[0, 0].numpy()
+        else:
+            boostrap_value = 0.0
+
+        returns = []
+        R = boostrap_value
+        for r in reversed(rewards):
+            R = r + self.gamma * R
+            returns.insert(0, R)
+
+        return np.asarray(states, dtype=np.float32), np.asarray(actions, np.int32), np.asarray(returns, dtype=np.float32)
 
     def collect_episode(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         states, actions, rewards = [], [], []
@@ -90,8 +124,7 @@ class Agent:
             state = next_state
         return np.asarray(states, dtype=np.float32), np.asarray(actions, dtype=np.int32), np.asarray(rewards, dtype=np.float32)
 
-    # Maybe the current action should only get critited for the next fixed action not all actions in the future
-    def compute_returns(self, episode_rewards: np.ndarray) -> np.ndarray:
+    def compute_returns(self, episode_rewards: np.ndarray) -> np.ndarray:    # Maybe the current action should only get critited for the next fixed action not all actions in the future
         for i in range(len(episode_rewards) - 2, -1, -1):
             episode_rewards[i] += self.gamma * episode_rewards[i+1]
         return episode_rewards
@@ -125,7 +158,7 @@ class Agent:
 
     def learn_from_episode(self):
         start = perf_counter()
-        states, actions, rewards = self.collect_episode()
+        states, actions, rewards = self.collect_rollout()
         returns = self.compute_returns(rewards)
         loss, actor_loss, critic_loss, entropy_loss = self.train_step(states, actions, returns)
         end = perf_counter()
@@ -178,7 +211,7 @@ def main():
     
     episodes_reward: deque = deque(maxlen=100)
     try:
-        t = tqdm.trange(8000)
+        t = tqdm.trange(10_000)
         for iteration in t:
             episode_reward, loss, actor_loss, critic_loss, entropy_loss, iteration_time = agent.learn_from_episode()
             episodes_reward.append(episode_reward)
