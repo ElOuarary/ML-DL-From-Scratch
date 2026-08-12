@@ -1,5 +1,5 @@
 import gymnasium as gym
-# from gymnasium.wrappers import RecordVideo
+from gymnasium.vector import SyncVectorEnv
 import ale_py
 import numpy as np
 import tensorflow as tf
@@ -57,7 +57,7 @@ class Actor2Critic(keras.Model):
 class Agent:
     def __init__(self, env, test_env, model, optimizer, critic_loss_fn, gamma, batch_size):
         self.env = env
-        self.current_state, _ = env.reset()
+        self.current_states, _ = env.reset()
         self.test_env = test_env
         self.model = model
         self.critic_loss_fn = critic_loss_fn
@@ -68,66 +68,46 @@ class Agent:
     @tf.function
     def predict(self, state):
         action_logits, state_value = self.model(state)
-        action = tf.random.categorical(action_logits, num_samples=1)[0, 0]
+        action = tf.random.categorical(action_logits, num_samples=1)
         return action, state_value
 
     def collect_rollout(self, n_steps=5) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        states, actions, rewards = [], [], []
-        state, _ = self.env.reset() if self.current_state is None else (self.current_state, None)
+        states_l, actions_l, rewards_l = [], [], []
+        states, _ = self.env.reset() if self.current_states is None else (self.current_states, None)
 
         for _ in tf.range(n_steps):
-            state_transpose = np.transpose((state.astype(np.float32)), axes=[1, 2, 0])
-            action, _ = self.predict(state_transpose[np.newaxis])
-            next_state, reward, terminated, truncated, _ = self.env.step(action.numpy())
+            states_transpose = np.transpose((states.astype(np.float32)), axes=[0, 2, 3, 1])
+            actions, _ = self.predict(states_transpose)
+            next_states, rewards, terminated, truncated, _ = self.env.step(actions[:, 0].numpy())
 
-            states.append(state_transpose)
-            actions.append(action)
-            rewards.append(reward)
+            # Possibility to stack the collected items
+            states_l.append(states_transpose)
+            actions_l.append(actions)
+            rewards_l.append(rewards)
 
-            state = next_state
+            states = next_states
 
-            if terminated or truncated:
+            # If one environment finish, the loop will break even if the other envirnomnet still did not and will lead to creating a
+            # new environments, for now I will keep it simple until I figure out a way
+            if np.all(terminated | truncated):
                 self.current_state = None
                 break
 
-        if not (terminated or truncated):
-            next_state_norm = np.transpose(state.astype(np.float32), axes=[1, 2, 0])[np.newaxis]
+        boostraped_value = np.zeros(self.env.num_envs)
+        indices = np.logical_not(terminated | truncated)
+        if np.any(indices):
+            next_state_norm = np.transpose(states[indices].astype(np.float32), axes=[0, 2, 3, 1])
             _, boostrap_value = self.model(next_state_norm)
-            boostrap_value = boostrap_value[0, 0].numpy()
-        else:
-            boostrap_value = 0.0
+            boostrap_value = boostrap_value[0].numpy()
+            boostraped_value[indices] = boostrap_value
 
         returns = []
-        R = boostrap_value
-        for r in reversed(rewards):
+        R = boostraped_value
+        for r in reversed(rewards_l):
             R = r + self.gamma * R
             returns.insert(0, R)
 
-        return np.asarray(states, dtype=np.float32), np.asarray(actions, np.int32), np.asarray(returns, dtype=np.float32)
-
-    def collect_episode(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        states, actions, rewards = [], [], []
-        state, _ = self.env.reset()
-        for _ in range(1000):
-            state = np.transpose(state, (1, 2, 0))
-            state = state.astype(np.float32)[np.newaxis]
-            action = self.predict(state)
-            next_state, reward, terminated, truncated, _  = self.env.step(action.numpy())
-
-            states.append(state[0])
-            actions.append(action)
-            rewards.append(reward)
-            
-            if terminated or truncated:
-                break
-
-            state = next_state
-        return np.asarray(states, dtype=np.float32), np.asarray(actions, dtype=np.int32), np.asarray(rewards, dtype=np.float32)
-
-    def compute_returns(self, episode_rewards: np.ndarray) -> np.ndarray:    # Maybe the current action should only get critited for the next fixed action not all actions in the future
-        for i in range(len(episode_rewards) - 2, -1, -1):
-            episode_rewards[i] += self.gamma * episode_rewards[i+1]
-        return episode_rewards
+        return np.asarray(states_l, dtype=np.float32), np.asarray(actions_l, np.int32), np.asarray(returns, dtype=np.float32)
 
     def compute_loss(self, action_logits: tf.Tensor, action_log_probas: tf.Tensor, state_values: tf.Tensor, returns: tf.Tensor) -> tf.Tensor:
         advantage = tf.stop_gradient(returns - state_values)
@@ -158,11 +138,13 @@ class Agent:
 
     def learn_from_episode(self):
         start = perf_counter()
-        states, actions, rewards = self.collect_rollout()
-        returns = self.compute_returns(rewards)
+        states, actions, returns = self.collect_rollout()
+        states = np.reshape(states, (-1, 84, 84, 4))
+        actions = np.reshape(actions, (-1,))
+        returns = np.reshape(returns,  (-1,))
         loss, actor_loss, critic_loss, entropy_loss = self.train_step(states, actions, returns)
         end = perf_counter()
-        return np.sum(rewards), loss, actor_loss, critic_loss, entropy_loss, end - start
+        return np.mean(returns), loss, actor_loss, critic_loss, entropy_loss, end - start
 
     def test(self):
         states, _ = self.test_env.reset()
@@ -172,7 +154,7 @@ class Agent:
             frame = self.test_env.render()
             frames.append(frame)
             states = np.transpose(states, axes=(1, 2, 0))
-            states = states.astype(np.float32)[np.newaxis] / 255.0
+            states = states.astype(np.float32)[np.newaxis]
             action_logits, _ = self.model(states)
             optimal_action = tf.argmax(action_logits, axis=-1).numpy()[0]
             states, reward, terminated, truncated, _ = self.test_env.step(optimal_action)
@@ -184,8 +166,8 @@ class Agent:
 def main():
     metrics = MetricLog()
     gym.register_envs(ale_py)
-    env = make_atari_env("ALE/BattleZone-v5")
-    test_env = make_atari_env("ALE/BattleZone-v5", render_mode="rgb_array")
+    envs = SyncVectorEnv([make_atari_env("ALE/BattleZone-v5") for _ in range(8)])
+    test_env = make_atari_env("ALE/BattleZone-v5", render_mode="rgb_array")()
 
     model = Actor2Critic((84, 84, 4), 18)
     dummy_input = tf.zeros((1, 84, 84, 4))
@@ -194,38 +176,25 @@ def main():
     critic_loss_fn = keras.losses.Huber()
     optimizer = keras.optimizers.Nadam(learning_rate=0.0015, clipnorm=0.1)
 
-    agent = Agent(env, test_env, model, optimizer, critic_loss_fn, gamma, 100)
+    agent = Agent(envs, test_env, model, optimizer, critic_loss_fn, gamma, 100)
     reward_threhold = 3000
 
     current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
     train_logs_dir = "logs/A2C/BattleZone/train" + current_time
     test_logs_dir = "logs/A2C/BattleZone/test" + current_time
-    # logdir = "logs/A2C/BattleZone/func/" + current_time
 
     train_summary_writer = tf.summary.create_file_writer(train_logs_dir)
     test_summary_writer = tf.summary.create_file_writer(test_logs_dir)
-    # writer = tf.summary.create_file_writer(logdir)
-
-    # tf.summary.trace_on(graph=True)
-    # tf.profiler.experimental.start(logdir)
     
-    episodes_reward: deque = deque(maxlen=100)
+    moving_average_reward: deque = deque(maxlen=100)
     try:
         t = tqdm.trange(10_000)
         for iteration in t:
-            episode_reward, loss, actor_loss, critic_loss, entropy_loss, iteration_time = agent.learn_from_episode()
-            episodes_reward.append(episode_reward)
-            t.set_postfix(episode_reward=episode_reward, running_reward=np.mean(episodes_reward))
-            # if iteration == 0:
-            #     with writer.as_default():
-            #         tf.summary.trace_export(
-            #             name="A2C_BattleZone_NN",
-            #             step=0,
-            #             profiler_outdir=logdir
-            #         )
-            #     tf.summary.trace_off()
+            average_reward, loss, actor_loss, critic_loss, entropy_loss, iteration_time = agent.learn_from_episode()
+            moving_average_reward.append(average_reward)
+            t.set_postfix(episode_reward=average_reward, running_reward=np.mean(moving_average_reward))
 
-            if iteration % 100 == 0:
+            if iteration % 500 == 0:
                 test_reward , frames = agent.test()
                 imageio.mimsave(f"BattleZone-{iteration}.gif", frames, fps=30)
                 del frames
@@ -234,7 +203,7 @@ def main():
                 metrics.log(iteration, iteration_time)
 
                 with train_summary_writer.as_default():
-                    tf.summary.scalar("train reward", episode_reward, step=iteration)
+                    tf.summary.scalar("train reward", average_reward, step=iteration)
                     tf.summary.scalar("actor loss", actor_loss, step=iteration)
                     tf.summary.scalar("critic loss", critic_loss, step=iteration)
                     tf.summary.scalar("entropy loss", entropy_loss, step=iteration)
@@ -251,7 +220,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        env.close()
+        envs.close()
         test_env.close()
 
 if __name__ == "__main__":

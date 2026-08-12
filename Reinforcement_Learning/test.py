@@ -1,10 +1,15 @@
-import tensorflow as tf
+import gymnasium as gym
+from gymnasium.vector import SyncVectorEnv
+import ale_py
+import numpy as np
+from utils import make_atari_env
 
-logits = tf.random.normal((1, 6))
-probs = tf.nn.softmax(logits)
+gym.register_envs(ale_py)
 
-print("Logits:     ", logits.numpy()[0])
-print("Softmax:    ", probs.numpy()[0])
-print("Argmax logits:", tf.argmax(logits, axis=-1).numpy()[0])
-print("Argmax probs: ", tf.argmax(probs, axis=-1).numpy()[0])
-print("Identical?", tf.argmax(logits, axis=-1).numpy()[0] == tf.argmax(probs, axis=-1).numpy()[0])
+env = SyncVectorEnv([make_atari_env("ALE/BattleZone-v5") for _ in range(8)])
+
+env.reset()
+obs, returns, terminated, truncated, _ = env.step(env.action_space.sample())
+
+print(terminated | truncated)
+print(np.all(terminated | truncated))
