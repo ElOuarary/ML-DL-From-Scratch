@@ -1,4 +1,5 @@
 import gymnasium as gym
+from gymnasium.wrappers import AtariPreprocessing, FrameStackObservation
 # from gymnasium.wrappers import RecordVideo
 import ale_py
 import numpy as np
@@ -13,6 +14,8 @@ import psutil, os, csv
 from collections import deque
 from time import perf_counter
 from typing import Tuple
+
+from utils import make_atari_env
 
 class MetricLog:
     def __init__(self, path="metrics.csv"):
@@ -39,9 +42,7 @@ class Actor2Critic(keras.Model):
         self.shared_network = keras.models.Sequential([
             keras.layers.InputLayer(observation_space),
             keras.layers.Conv2D(32, kernel_size=8, strides=4,activation="relu"),
-            keras.layers.MaxPool2D(),
             keras.layers.Conv2D(64, kernel_size=4, strides=2, activation="relu"),
-            keras.layers.MaxPool2D(),
             keras.layers.Conv2D(64, kernel_size=3, strides=1, activation="relu"),
             keras.layers.Flatten(),
             keras.layers.Dense(256, activation="relu"),
@@ -74,7 +75,8 @@ class Agent:
         states, actions, rewards = [], [], []
         state, _ = self.env.reset()
         for _ in range(1000):
-            state = state.astype(np.float32)[np.newaxis] / 255.0
+            state = np.transpose(state, (1, 2, 0))
+            state = state.astype(np.float32)[np.newaxis]
             action = self.predict(state)
             next_state, reward, terminated, truncated, _  = self.env.step(action.numpy())
 
@@ -94,14 +96,19 @@ class Agent:
             episode_rewards[i] += self.gamma * episode_rewards[i+1]
         return episode_rewards
 
-    # Possibility to include the entropy loss to improve training and agent action's selection
-    def compute_loss(self, action_probas: tf.Tensor, state_values: tf.Tensor, returns: tf.Tensor) -> tf.Tensor:
-        action_loss = - tf.reduce_mean((returns - state_values) * action_probas)
+    def compute_loss(self, action_logits: tf.Tensor, action_log_probas: tf.Tensor, state_values: tf.Tensor, returns: tf.Tensor) -> tf.Tensor:
+        advantage = tf.stop_gradient(returns - state_values)
+        action_loss = - tf.reduce_mean(advantage * action_log_probas)
         value_loss = self.critic_loss_fn(returns, state_values)
-        return action_loss + value_loss, action_loss, value_loss
+
+        policy = tf.nn.softmax(action_logits)
+        log_policy = tf.nn.log_softmax(action_logits)
+        entropy_loss = 0.01 * tf.reduce_mean(tf.math.reduce_sum(policy * log_policy, axis=-1))
+
+        return action_loss + value_loss + entropy_loss, action_loss, value_loss, entropy_loss
 
     @tf.function(input_signature=[
-        tf.TensorSpec(shape=(None, 210, 160, 3), dtype=tf.float32),
+        tf.TensorSpec(shape=(None, 84, 84, 4), dtype=tf.float32),
         tf.TensorSpec(shape=(None,), dtype=tf.int32),
         tf.TensorSpec(shape=(None,), dtype=tf.float32)
     ])
@@ -109,44 +116,20 @@ class Agent:
         returns = tf.expand_dims(returns, axis=1)
         with tf.GradientTape() as tape:
             action_logits, state_values = self.model(states)
-            action_probas = tf.expand_dims(tf.gather(tf.nn.log_softmax(action_logits), actions, batch_dims=1), axis=1)
-            loss, actor_loss, critic_loss = self.compute_loss(action_probas, state_values, returns)
+            action_log_probas = tf.expand_dims(tf.gather(tf.nn.log_softmax(action_logits), actions, batch_dims=1), axis=1)
+            loss, actor_loss, critic_loss, entropy_loss = self.compute_loss(action_logits, action_log_probas, state_values, returns)
 
         grads = tape.gradient(loss, self.model.trainable_variables)
-        return loss, actor_loss, critic_loss, grads
-
-    @tf.function(input_signature=[
-        tf.TensorSpec(shape=(None, 210, 160, 3), dtype=tf.float32),
-        tf.TensorSpec(shape=(None,), dtype=tf.int32),
-        tf.TensorSpec(shape=(None,), dtype=tf.float32),
-        tf.TensorSpec(shape=(), dtype=tf.float32),
-        tf.TensorSpec(shape=(), dtype=tf.float32),
-        tf.TensorSpec(shape=(), dtype=tf.float32),
-        tf.TensorSpec(shape=(), dtype=tf.int32),
-    ])
-    def train_batch(self, states, actions, returns, accum_loss, accum_actor_loss, accum_critic_loss, num_samples):
-        num_batches = tf.constant(0, dtype=tf.float32)
-        accum_grads = [tf.zeros_like(v) for v in self.model.trainable_variables]
-        for i in tf.range(0, num_samples, self.batch_size):
-            limit = tf.minimum(i + self.batch_size, num_samples)
-            loss, actor_loss, critic_loss, grads = self.train_step(states[i: limit], actions[i: limit], returns[i: limit])
-            accum_grads = [ag + g for ag, g in zip(accum_grads, grads)]
-            accum_loss += loss
-            accum_actor_loss += actor_loss
-            accum_critic_loss += critic_loss
-            num_batches += 1
-        self.optimizer.apply_gradients(zip(accum_grads, self.model.trainable_variables))
-        return accum_loss / num_batches, accum_actor_loss / num_batches, accum_critic_loss / num_batches
+        self.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
+        return loss, actor_loss, critic_loss, entropy_loss
 
     def learn_from_episode(self):
         start = perf_counter()
         states, actions, rewards = self.collect_episode()
         returns = self.compute_returns(rewards)
-        accum_loss, accum_actor_loss, accum_critic_loss, = np.array(0, dtype=np.float32), np.array(0, dtype=np.float32), np.array(0, dtype=np.float32)
-        num_samples = states.shape[0]
-        loss, actor_loss, critic_loss = self.train_batch(states, actions, returns, accum_loss, accum_actor_loss, accum_critic_loss, num_samples)
+        loss, actor_loss, critic_loss, entropy_loss = self.train_step(states, actions, returns)
         end = perf_counter()
-        return np.sum(rewards), loss, actor_loss, critic_loss, end - start
+        return np.sum(rewards), loss, actor_loss, critic_loss, entropy_loss, end - start
 
     def test(self):
         states, _ = self.test_env.reset()
@@ -155,10 +138,10 @@ class Agent:
         while True:
             frame = self.test_env.render()
             frames.append(frame)
+            states = np.transpose(states, axes=(1, 2, 0))
             states = states.astype(np.float32)[np.newaxis] / 255.0
             action_logits, _ = self.model(states)
-            action_probas = tf.nn.softmax(action_logits)
-            optimal_action = tf.argmax(action_probas, axis=-1).numpy()[0]
+            optimal_action = tf.argmax(action_logits, axis=-1).numpy()[0]
             states, reward, terminated, truncated, _ = self.test_env.step(optimal_action)
             total_reward += reward
             if terminated or truncated:
@@ -168,11 +151,13 @@ class Agent:
 def main():
     metrics = MetricLog()
     gym.register_envs(ale_py)
-    env = gym.make("ALE/BattleZone-v5")
-    test_env = gym.make("ALE/BattleZone-v5", render_mode="rgb_array")
-    model = Actor2Critic(env.observation_space.shape, 18)
-    gamma = 0.99
+    env = make_atari_env("ALE/BattleZone-v5")
+    test_env = make_atari_env("ALE/BattleZone-v5", render_mode="rgb_array")
 
+    model = Actor2Critic((84, 84, 4), 18)
+    dummy_input = tf.zeros((1, 84, 84, 4))
+    _ = model(dummy_input)
+    gamma = 0.99
     critic_loss_fn = keras.losses.Huber()
     optimizer = keras.optimizers.Nadam(learning_rate=0.0015, clipnorm=0.1)
 
@@ -188,14 +173,14 @@ def main():
     test_summary_writer = tf.summary.create_file_writer(test_logs_dir)
     # writer = tf.summary.create_file_writer(logdir)
 
-    tf.summary.trace_on(graph=True)
+    # tf.summary.trace_on(graph=True)
     # tf.profiler.experimental.start(logdir)
     
     episodes_reward: deque = deque(maxlen=100)
     try:
         t = tqdm.trange(8000)
         for iteration in t:
-            episode_reward, loss, actor_loss, critic_loss, iteration_time = agent.learn_from_episode()
+            episode_reward, loss, actor_loss, critic_loss, entropy_loss, iteration_time = agent.learn_from_episode()
             episodes_reward.append(episode_reward)
             t.set_postfix(episode_reward=episode_reward, running_reward=np.mean(episodes_reward))
             # if iteration == 0:
@@ -219,6 +204,7 @@ def main():
                     tf.summary.scalar("train reward", episode_reward, step=iteration)
                     tf.summary.scalar("actor loss", actor_loss, step=iteration)
                     tf.summary.scalar("critic loss", critic_loss, step=iteration)
+                    tf.summary.scalar("entropy loss", entropy_loss, step=iteration)
                     tf.summary.scalar("loss", loss, step=iteration)
                     tf.summary.scalar("iteration_time", iteration_time, step=iteration)
                 
@@ -228,8 +214,6 @@ def main():
 
                 if test_reward > reward_threhold:
                         print("Problem Solved!")
-            
-            iteration += 1
             
     except KeyboardInterrupt:
         pass
