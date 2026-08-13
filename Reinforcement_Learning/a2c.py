@@ -65,54 +65,52 @@ class Agent:
         self.gamma = gamma
         self.n_steps = n_steps
 
+        self.states = tf.Variable(tf.zeros_initializer()(shape=(self.n_steps, 8, 84, 84, 4), dtype=tf.float32))
+        self.actions = tf.Variable(tf.zeros_initializer()(shape=(self.n_steps, self.env.num_envs), dtype=tf.int32))
+        self.rewards = tf.Variable(tf.zeros_initializer()(shape=(self.n_steps, self.env.num_envs), dtype=tf.float32))
+        self.dones = tf.Variable(tf.zeros_initializer()(shape=(self.n_steps, self.env.num_envs), dtype=tf.bool))
+        self.boostrapped_values = tf.Variable(tf.zeros_initializer()(shape=(self.env.num_envs,), dtype=np.float32))
+        self.train_returns = tf.Variable(tf.zeros_initializer()(shape=self.rewards.shape, dtype=np.float32))
+                
+
     @tf.function
     def predict(self, state):
-        action_logits, state_value = self.model(state)
-        action = tf.random.categorical(action_logits, num_samples=1)
-        return action, state_value
+        action_logits, _ = self.model(state)
+        action = tf.random.categorical(action_logits, num_samples=1, dtype=tf.int32)
+        return action
 
-    def collect_rollout(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        states_l, actions_l, rewards_l, dones_l = [], [], [], []
-        states, _ = self.env.reset() if self.current_states is None else (self.current_states, None)
+    def _step_env(self, actions: np.ndarray):
+        next_states, rewards, terminated, truncated, _ = self.env.step(actions)
+        return next_states.astype(np.float32), rewards.astype(np.float32), np.logical_or(terminated, truncated)
 
-        for _ in tf.range(self.n_steps):
-            states_transpose = np.transpose((states.astype(np.float32)), axes=[0, 2, 3, 1]) / 255.0
-            actions, _ = self.predict(states_transpose)
-            next_states, rewards, terminated, truncated, _ = self.env.step(actions[:, 0].numpy())
+    @tf.function
+    def collect_rollout(self, states: tf.Tensor, train_states: tf.Tensor, train_actions: tf.Tensor, train_rewards: tf.Tensor, train_dones: tf.Tensor, boostrapped_values: tf.Tensor, train_returns: tf.Tensor) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        for i in tf.range(self.n_steps):
+            states_transpose = tf.transpose(states, perm=[0, 2, 3, 1]) / 255.0
+            actions = self.predict(states_transpose)[:, 0]
+            next_states, rewards, dones = tf.numpy_function(
+                func=self._step_env,
+                inp=[actions],
+                Tout=[tf.float32, tf.float32, tf.bool]
+            )
+            train_states[i].assign(states_transpose)
+            train_actions[i].assign(actions)
+            train_rewards[i].assign(rewards)
+            train_dones[i].assign(dones)
 
-            states_l.append(states_transpose)
-            actions_l.append(actions)
-            rewards_l.append(rewards)
-            dones_l.append(terminated | truncated)
-
-            states = next_states
-
-        states_a = np.stack(states_l, axis=0)
-        actions_a = np.stack(actions_l, axis=0)
-        rewards_a = np.stack(rewards_l, axis=0)
-        dones_a = np.stack(dones_l, axis=0)
+            states.assign(next_states)
 
         self.current_states = states
 
-        next_states = np.transpose(next_states.astype(np.float32), axes=(0, 2, 3, 1)) / 255.0
+        next_states = tf.transpose(next_states, perm=(0, 2, 3, 1)) / 255.0
         _, next_state_value = self.model(next_states)
-        boostrapped_values = next_state_value.numpy().flatten()
+        boostrapped_values.assign(next_state_value[:, 0]) 
 
-        returns = np.zeros_like(rewards_a, dtype=np.float32)
-        for env_id in range(self.env.num_envs):
-            R = boostrapped_values[env_id]
-            for i in reversed(range(self.n_steps)):
-                if dones_a[i, env_id]:
-                    R = rewards_a[i, env_id]
-                else:
-                    R = rewards_a[i, env_id] + self.gamma * R
-                returns[i, env_id] = R
+        for i in tf.reverse(tf.range(self.n_steps), axis=[0]):
+            boostrapped_values.assign(tf.where(train_dones[i], train_rewards[i], train_rewards[i] + self.gamma * boostrapped_values))
+            train_returns[i].assign(boostrapped_values)
 
-        train_states = states_a.reshape(-1, 84, 84, 4)
-        train_actions = actions_a.reshape(-1)
-        train_returns = returns.reshape(-1)
-
-        return train_states, train_actions, train_returns
+        return tf.reshape(train_states, shape=(-1, 84, 84, 4)), tf.reshape(train_actions, shape=(-1,)), tf.reshape(train_returns, shape=(-1,))
 
     def compute_loss(self, action_logits: tf.Tensor, action_log_probas: tf.Tensor, state_values: tf.Tensor, returns: tf.Tensor) -> tf.Tensor:
         advantage = tf.stop_gradient(returns - state_values)
@@ -143,7 +141,9 @@ class Agent:
 
     def learn_from_episode(self):
         start = perf_counter()
-        states, actions, returns = self.collect_rollout()
+        current_states, _ = self.env.reset() if self.current_states is None else (self.current_states, None)
+        current_states = tf.Variable(current_states, dtype=tf.float32)
+        states, actions, returns = self.collect_rollout(current_states, self.states, self.actions, self.rewards, self.dones, self.boostrapped_values, self.train_returns)
         loss, actor_loss, critic_loss, entropy_loss = self.train_step(states, actions, returns)
         end = perf_counter()
         return np.mean(returns), loss, actor_loss, critic_loss, entropy_loss, end - start
