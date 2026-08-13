@@ -55,7 +55,7 @@ class Actor2Critic(keras.Model):
         return self.actor(x), self.critic(x)
 
 class Agent:
-    def __init__(self, env, test_env, model, optimizer, critic_loss_fn, gamma, batch_size):
+    def __init__(self, env, test_env, model, optimizer, critic_loss_fn, gamma, n_steps=5):
         self.env = env
         self.current_states, _ = env.reset()
         self.test_env = test_env
@@ -63,7 +63,7 @@ class Agent:
         self.critic_loss_fn = critic_loss_fn
         self.optimizer = optimizer
         self.gamma = gamma
-        self.batch_size = batch_size
+        self.n_steps = n_steps
 
     @tf.function
     def predict(self, state):
@@ -71,43 +71,48 @@ class Agent:
         action = tf.random.categorical(action_logits, num_samples=1)
         return action, state_value
 
-    def collect_rollout(self, n_steps=5) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        states_l, actions_l, rewards_l = [], [], []
+    def collect_rollout(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        states_l, actions_l, rewards_l, dones_l = [], [], [], []
         states, _ = self.env.reset() if self.current_states is None else (self.current_states, None)
 
-        for _ in tf.range(n_steps):
-            states_transpose = np.transpose((states.astype(np.float32)), axes=[0, 2, 3, 1])
+        for _ in tf.range(self.n_steps):
+            states_transpose = np.transpose((states.astype(np.float32)), axes=[0, 2, 3, 1]) / 255.0
             actions, _ = self.predict(states_transpose)
             next_states, rewards, terminated, truncated, _ = self.env.step(actions[:, 0].numpy())
 
-            # Possibility to stack the collected items
             states_l.append(states_transpose)
             actions_l.append(actions)
             rewards_l.append(rewards)
+            dones_l.append(terminated | truncated)
 
             states = next_states
 
-            # If one environment finish, the loop will break even if the other envirnomnet still did not and will lead to creating a
-            # new environments, for now I will keep it simple until I figure out a way
-            if np.all(terminated | truncated):
-                self.current_state = None
-                break
+        states_a = np.stack(states_l, axis=0)
+        actions_a = np.stack(actions_l, axis=0)
+        rewards_a = np.stack(rewards_l, axis=0)
+        dones_a = np.stack(dones_l, axis=0)
 
-        boostraped_value = np.zeros(self.env.num_envs)
-        indices = np.logical_not(terminated | truncated)
-        if np.any(indices):
-            next_state_norm = np.transpose(states[indices].astype(np.float32), axes=[0, 2, 3, 1])
-            _, boostrap_value = self.model(next_state_norm)
-            boostrap_value = boostrap_value[0].numpy()
-            boostraped_value[indices] = boostrap_value
+        self.current_states = states
 
-        returns = []
-        R = boostraped_value
-        for r in reversed(rewards_l):
-            R = r + self.gamma * R
-            returns.insert(0, R)
+        next_states = np.transpose(next_states.astype(np.float32), axes=(0, 2, 3, 1)) / 255.0
+        _, next_state_value = self.model(next_states)
+        boostrapped_values = next_state_value.numpy().flatten()
 
-        return np.asarray(states_l, dtype=np.float32), np.asarray(actions_l, np.int32), np.asarray(returns, dtype=np.float32)
+        returns = np.zeros_like(rewards_a, dtype=np.float32)
+        for env_id in range(self.env.num_envs):
+            R = boostrapped_values[env_id]
+            for i in reversed(range(self.n_steps)):
+                if dones_a[i, env_id]:
+                    R = rewards_a[i, env_id]
+                else:
+                    R = rewards_a[i, env_id] + self.gamma * R
+                returns[i, env_id] = R
+
+        train_states = states_a.reshape(-1, 84, 84, 4)
+        train_actions = actions_a.reshape(-1)
+        train_returns = returns.reshape(-1)
+
+        return train_states, train_actions, train_returns
 
     def compute_loss(self, action_logits: tf.Tensor, action_log_probas: tf.Tensor, state_values: tf.Tensor, returns: tf.Tensor) -> tf.Tensor:
         advantage = tf.stop_gradient(returns - state_values)
@@ -139,9 +144,6 @@ class Agent:
     def learn_from_episode(self):
         start = perf_counter()
         states, actions, returns = self.collect_rollout()
-        states = np.reshape(states, (-1, 84, 84, 4))
-        actions = np.reshape(actions, (-1,))
-        returns = np.reshape(returns,  (-1,))
         loss, actor_loss, critic_loss, entropy_loss = self.train_step(states, actions, returns)
         end = perf_counter()
         return np.mean(returns), loss, actor_loss, critic_loss, entropy_loss, end - start
@@ -150,11 +152,11 @@ class Agent:
         states, _ = self.test_env.reset()
         frames = []
         total_reward = 0
-        while True:
+        for _ in range(5_000):
             frame = self.test_env.render()
             frames.append(frame)
             states = np.transpose(states, axes=(1, 2, 0))
-            states = states.astype(np.float32)[np.newaxis]
+            states = states.astype(np.float32)[np.newaxis] / 255.0
             action_logits, _ = self.model(states)
             optimal_action = tf.argmax(action_logits, axis=-1).numpy()[0]
             states, reward, terminated, truncated, _ = self.test_env.step(optimal_action)
@@ -195,7 +197,7 @@ def main():
             t.set_postfix(episode_reward=average_reward, running_reward=np.mean(moving_average_reward))
 
             if iteration % 500 == 0:
-                test_reward , frames = agent.test()
+                test_reward, frames = agent.test()
                 imageio.mimsave(f"BattleZone-{iteration}.gif", frames, fps=30)
                 del frames
                 gc.collect()
