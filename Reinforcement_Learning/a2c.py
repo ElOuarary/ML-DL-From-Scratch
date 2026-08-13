@@ -63,15 +63,7 @@ class Agent:
         self.critic_loss_fn = critic_loss_fn
         self.optimizer = optimizer
         self.gamma = gamma
-        self.n_steps = n_steps
-
-        self.states = tf.Variable(tf.zeros_initializer()(shape=(self.n_steps, 8, 84, 84, 4), dtype=tf.float32))
-        self.actions = tf.Variable(tf.zeros_initializer()(shape=(self.n_steps, self.env.num_envs), dtype=tf.int32))
-        self.rewards = tf.Variable(tf.zeros_initializer()(shape=(self.n_steps, self.env.num_envs), dtype=tf.float32))
-        self.dones = tf.Variable(tf.zeros_initializer()(shape=(self.n_steps, self.env.num_envs), dtype=tf.bool))
-        self.boostrapped_values = tf.Variable(tf.zeros_initializer()(shape=(self.env.num_envs,), dtype=np.float32))
-        self.train_returns = tf.Variable(tf.zeros_initializer()(shape=self.rewards.shape, dtype=np.float32))
-                
+        self.n_steps = n_steps  
 
     @tf.function
     def predict(self, state):
@@ -79,55 +71,57 @@ class Agent:
         action = tf.random.categorical(action_logits, num_samples=1, dtype=tf.int32)
         return action
 
-    def _step_env(self, actions: np.ndarray):
-        next_states, rewards, terminated, truncated, _ = self.env.step(actions)
-        return next_states.astype(np.float32), rewards.astype(np.float32), np.logical_or(terminated, truncated)
+    def collect_rollout(self, states: np.ndarray) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+        train_states = np.zeros(shape=(self.n_steps, 8, 84, 84, 4), dtype=np.float32)
+        train_actions = np.zeros(shape=(self.n_steps, self.env.num_envs), dtype=np.int32)
+        train_rewards = np.zeros(shape=(self.n_steps, self.env.num_envs), dtype=np.float32)
+        train_dones = np.zeros(shape=(self.n_steps, self.env.num_envs), dtype=np.bool)
 
-    @tf.function
-    def collect_rollout(self, states: tf.Tensor, train_states: tf.Tensor, train_actions: tf.Tensor, train_rewards: tf.Tensor, train_dones: tf.Tensor, boostrapped_values: tf.Tensor, train_returns: tf.Tensor) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        for i in tf.range(self.n_steps):
-            states_transpose = tf.transpose(states, perm=[0, 2, 3, 1]) / 255.0
-            actions = self.predict(states_transpose)[:, 0]
-            next_states, rewards, dones = tf.numpy_function(
-                func=self._step_env,
-                inp=[actions],
-                Tout=[tf.float32, tf.float32, tf.bool]
-            )
-            train_states[i].assign(states_transpose)
-            train_actions[i].assign(actions)
-            train_rewards[i].assign(rewards)
-            train_dones[i].assign(dones)
+        for step in range(self.n_steps):
+            states_transpose = np.transpose(states.astype(np.float32), axes=[0, 2, 3, 1]) / 255.0
+            actions = self.predict(states_transpose).numpy().flatten()
+            next_states, rewards, terminated, _, _ = self.env.step(actions)
 
-            states.assign(next_states)
+            train_states[step] = states_transpose
+            train_actions[step] = actions
+            train_rewards[step] = rewards
+            train_dones[step] = terminated
+
+            states = next_states
 
         self.current_states = states
 
-        next_states = tf.transpose(next_states, perm=(0, 2, 3, 1)) / 255.0
+        next_states = np.transpose(next_states.astype(np.float32), axes=(0, 2, 3, 1)) / 255.0
         _, next_state_value = self.model(next_states)
-        boostrapped_values.assign(next_state_value[:, 0]) 
+        boostrapped_values = next_state_value[:, 0].numpy()
+        
+        train_returns = np.zeros_like(train_rewards)
+        for i in reversed(range(self.n_steps)):
+            boostrapped_values = np.where(train_dones[i], train_rewards[i], train_rewards[i] + self.gamma * boostrapped_values)
+            train_returns[i] = boostrapped_values
 
-        for i in tf.reverse(tf.range(self.n_steps), axis=[0]):
-            boostrapped_values.assign(tf.where(train_dones[i], train_rewards[i], train_rewards[i] + self.gamma * boostrapped_values))
-            train_returns[i].assign(boostrapped_values)
-
-        return tf.reshape(train_states, shape=(-1, 84, 84, 4)), tf.reshape(train_actions, shape=(-1,)), tf.reshape(train_returns, shape=(-1,))
+        return (
+            tf.convert_to_tensor(train_states.reshape(-1, 84, 84, 4), dtype=tf.float32),
+            tf.convert_to_tensor(train_actions.reshape(-1,), dtype=tf.int32),
+            tf.convert_to_tensor(train_returns.reshape(-1,), dtype=tf.float32)
+        )
 
     def compute_loss(self, action_logits: tf.Tensor, action_log_probas: tf.Tensor, state_values: tf.Tensor, returns: tf.Tensor) -> tf.Tensor:
         advantage = tf.stop_gradient(returns - state_values)
-        action_loss = - tf.reduce_mean(advantage * action_log_probas)
+        normalized_advantage = (advantage - tf.reduce_mean(advantage)) / (tf.math.reduce_std(advantage) + 1e-8)
+        action_loss = - tf.reduce_mean(normalized_advantage * action_log_probas)
         value_loss = self.critic_loss_fn(returns, state_values)
 
         policy = tf.nn.softmax(action_logits)
         log_policy = tf.nn.log_softmax(action_logits)
-        entropy_loss = 0.01 * tf.reduce_mean(tf.math.reduce_sum(policy * log_policy, axis=-1))
+        entropy = tf.reduce_mean(tf.math.reduce_sum(policy * log_policy, axis=-1))
 
-        return action_loss + value_loss + entropy_loss, action_loss, value_loss, entropy_loss
+        return action_loss + value_loss + 0.01 * entropy, action_loss, value_loss, entropy
 
-    @tf.function(input_signature=[
-        tf.TensorSpec(shape=(None, 84, 84, 4), dtype=tf.float32),
-        tf.TensorSpec(shape=(None,), dtype=tf.int32),
-        tf.TensorSpec(shape=(None,), dtype=tf.float32)
-    ])
+    @tf.function(
+        input_signature=[tf.TensorSpec(shape=(None, 84, 84, 4), dtype=tf.float32),tf.TensorSpec(shape=(None,), dtype=tf.int32),tf.TensorSpec(shape=(None,), dtype=tf.float32)],
+        jit_compile=True
+    )
     def train_step(self, states: tf.Tensor, actions: tf.Tensor, returns: tf.Tensor):
         returns = tf.expand_dims(returns, axis=1)
         with tf.GradientTape() as tape:
@@ -142,8 +136,7 @@ class Agent:
     def learn_from_episode(self):
         start = perf_counter()
         current_states, _ = self.env.reset() if self.current_states is None else (self.current_states, None)
-        current_states = tf.Variable(current_states, dtype=tf.float32)
-        states, actions, returns = self.collect_rollout(current_states, self.states, self.actions, self.rewards, self.dones, self.boostrapped_values, self.train_returns)
+        states, actions, returns = self.collect_rollout(current_states)
         loss, actor_loss, critic_loss, entropy_loss = self.train_step(states, actions, returns)
         end = perf_counter()
         return np.mean(returns), loss, actor_loss, critic_loss, entropy_loss, end - start
@@ -178,7 +171,7 @@ def main():
     critic_loss_fn = keras.losses.Huber()
     optimizer = keras.optimizers.Nadam(learning_rate=0.0015, clipnorm=0.1)
 
-    agent = Agent(envs, test_env, model, optimizer, critic_loss_fn, gamma, 100)
+    agent = Agent(envs, test_env, model, optimizer, critic_loss_fn, gamma, 20)
     reward_threhold = 3000
 
     current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -190,13 +183,13 @@ def main():
     
     moving_average_reward: deque = deque(maxlen=100)
     try:
-        t = tqdm.trange(10_000)
+        t = tqdm.trange(100_000)
         for iteration in t:
             average_reward, loss, actor_loss, critic_loss, entropy_loss, iteration_time = agent.learn_from_episode()
             moving_average_reward.append(average_reward)
             t.set_postfix(episode_reward=average_reward, running_reward=np.mean(moving_average_reward))
 
-            if iteration % 500 == 0:
+            if iteration % 1000 == 0:
                 test_reward, frames = agent.test()
                 imageio.mimsave(f"BattleZone-{iteration}.gif", frames, fps=30)
                 del frames
