@@ -10,10 +10,10 @@ import imageio
 import numpy as np
 import tensorflow as tf
 import tqdm
-from gymnasium.vector import SyncVectorEnv
+from gymnasium.vector import AsyncVectorEnv
 from tensorflow import keras
 
-from utils import MetricLog, make_atari_env
+from Reinforcement_Learning.utils import MetricLog, make_atari_env
 
 
 def build_arg_parser():
@@ -23,12 +23,15 @@ def build_arg_parser():
     arg_parser.add_argument("--alpha", default=0.001, type=float)
     arg_parser.add_argument("--entropy-beta", default=0.01, type=float)
     arg_parser.add_argument("--num-steps", default=5, type=int)
+    arg_parser.add_argument("--train-iteration", default=100_000, type=int)
+    arg_parser.add_argument("--log-interval", default=1000, type=int)
     arg_parser.add_argument("--reward-threshold", default=5_000, type=float)
+    arg_parser.add_argument("--test-steps", default=5000, type=int)
     return arg_parser
 
 
 class Actor2Critic(keras.Model):
-    def __init__(self, observation_space: int, action_space: int):
+    def __init__(self, observation_space: tuple[int, int, int], action_space: int):
         super().__init__()
         self.shared_network = keras.models.Sequential(
             [
@@ -50,23 +53,26 @@ class Actor2Critic(keras.Model):
 
 class Agent:
     def __init__(
-        self, env, test_env, model, optimizer, critic_loss_fn, gamma, beta, n_steps
+        self, env, test_env, demo_env, model, optimizer, critic_loss_fn, gamma, beta, n_steps, test_steps
     ):
         self.env = env
         self.current_states, _ = env.reset()
+        self.num_envs, self.stack, self.height, self.width = self.env.observation_space.shape
         self.obs_shape = (
-            self.env.num_envs,
-            self.env.observation_space.shape[2],
-            self.env.observation_space.shape[3],
-            self.env.observation_space.shape[1],
+            self.num_envs,
+            self.height,
+            self.width,
+            self.stack,
         )
         self.test_env = test_env
+        self.demo_env = demo_env
         self.model = model
         self.critic_loss_fn = critic_loss_fn
         self.optimizer = optimizer
         self.gamma = gamma
         self.beta = beta
         self.n_steps = n_steps
+        self.test_steps = test_steps
 
     @tf.function
     def predict(self, state):
@@ -79,12 +85,12 @@ class Agent:
     ) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
         train_states = np.zeros(shape=(self.n_steps, *self.obs_shape), dtype=np.float32)
         train_actions = np.zeros(
-            shape=(self.n_steps, self.env.num_envs), dtype=np.int32
+            shape=(self.n_steps, self.num_envs), dtype=np.int32
         )
         train_rewards = np.zeros(
-            shape=(self.n_steps, self.env.num_envs), dtype=np.float32
+            shape=(self.n_steps, self.num_envs), dtype=np.float32
         )
-        train_dones = np.zeros(shape=(self.n_steps, self.env.num_envs), dtype=np.bool)
+        train_dones = np.zeros(shape=(self.n_steps, self.num_envs), dtype=np.bool)
 
         for step in range(self.n_steps):
             states_transpose = (
@@ -149,13 +155,13 @@ class Agent:
 
         policy = tf.nn.softmax(action_logits)
         log_policy = tf.nn.log_softmax(action_logits)
-        entropy = tf.reduce_mean(tf.math.reduce_sum(policy * log_policy, axis=-1))
+        entropy_loss = self.beta * tf.reduce_mean(tf.math.reduce_sum(policy * log_policy, axis=-1))
 
         return (
-            action_loss + value_loss + self.beta * entropy,
+            action_loss + value_loss + entropy_loss,
             action_loss,
             value_loss,
-            entropy,
+            entropy_loss,
         )
 
     @tf.function(
@@ -168,7 +174,7 @@ class Agent:
     )
     def train_step(
         self, states: tf.Tensor, actions: tf.Tensor, returns: tf.Tensor
-    ) -> tuple(tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor):
+    ) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
         returns = tf.expand_dims(returns, axis=1)
         with tf.GradientTape() as tape:
             action_logits, state_values = self.model(states)
@@ -205,24 +211,25 @@ class Agent:
             end - start,
         )
 
-    def test(self):
-        states, _ = self.test_env.reset()
+    def test(self, demo=False):
+        states, _ = self.test_env.reset() if not demo else self.demo_env.reset()
         frames = []
         total_reward = 0
-        for _ in range(5_000):
-            frame = self.test_env.render()
-            frames.append(frame)
-            states = np.transpose(states, axes=(1, 2, 0))
-            states = states.astype(np.float32)[np.newaxis] / 255.0
-            action_logits, _ = self.model(states)
-            optimal_action = tf.argmax(action_logits, axis=-1).numpy()[0]
+        for _ in range(self.test_steps):
+            if demo:
+                frame = self.test_env.render()
+                frames.append(frame)
+            states = np.transpose(states, axes=(1, 2, 0))[np.newaxis] if demo else np.transpose(states, axes=(0, 2, 3, 1))
+            states = states.astype(np.float32) / 255.0
+            action_logits, _ = self.model(states, training=False)
+            optimal_action = tf.argmax(action_logits, axis=-1).numpy()
             states, reward, terminated, truncated, _ = self.test_env.step(
-                optimal_action
+                optimal_action[0] if demo else optimal_action
             )
             total_reward += reward
-            if terminated or truncated:
+            if not np.all(terminated):
                 break
-        return total_reward, frames
+        return np.mean(total_reward), frames
 
 
 def main():
@@ -235,10 +242,14 @@ def main():
     ALPHA = args.alpha
     ENTROPY_BETA = args.entropy_beta
     NUM_STEPS = args.num_steps
+    TRAIN_ITERATION = args.train_iteration
+    LOG_INTERVAL = args.log_interval
     REWARD_THRESHOLD = args.reward_threshold
+    TEST_STEPS = args.test_steps
 
-    envs = SyncVectorEnv([make_atari_env("ALE/BattleZone-v5") for _ in range(NUM_ENVS)])
-    test_env = make_atari_env("ALE/BattleZone-v5", render_mode="rgb_array")()
+    envs = AsyncVectorEnv([make_atari_env("ALE/BattleZone-v5") for _ in range(NUM_ENVS)])
+    test_env = AsyncVectorEnv([make_atari_env("ALE/BattleZone-v5", render_mode="rgb_array") for _ in range(5)])
+    demo_env = make_atari_env("ALE/BattleZone-v5", render_mode="rgb_array")()
 
     model = Actor2Critic((84, 84, 4), 18)
     dummy_input = tf.zeros((1, 84, 84, 4))
@@ -248,19 +259,19 @@ def main():
     optimizer = keras.optimizers.Nadam(learning_rate=ALPHA, clipnorm=0.1)
 
     agent = Agent(
-        envs, test_env, model, optimizer, critic_loss_fn, GAMMA, ENTROPY_BETA, NUM_STEPS
+        envs, test_env, demo_env, model, optimizer, critic_loss_fn, GAMMA, ENTROPY_BETA, NUM_STEPS, TEST_STEPS
     )
 
     current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
-    train_logs_dir = "logs/A2C/BattleZone/train" + current_time
-    test_logs_dir = "logs/A2C/BattleZone/test" + current_time
+    train_logs_dir = "logs/A2C/BattleZone/train/" + current_time
+    test_logs_dir = "logs/A2C/BattleZone/test/" + current_time
 
     train_summary_writer = tf.summary.create_file_writer(train_logs_dir)
     test_summary_writer = tf.summary.create_file_writer(test_logs_dir)
 
     moving_average_reward: deque = deque(maxlen=500)
     try:
-        t = tqdm.trange(100_000)
+        t = tqdm.trange(TRAIN_ITERATION)
         for iteration in t:
             (
                 average_reward,
@@ -276,11 +287,8 @@ def main():
                 running_reward=np.mean(moving_average_reward),
             )
 
-            if iteration % 1000 == 0:
-                test_reward, frames = agent.test()
-                imageio.mimsave(f"BattleZone-{iteration}.gif", frames, fps=30)
-                del frames
-                gc.collect()
+            if iteration % LOG_INTERVAL == 0:
+                test_reward, _ = agent.test()
 
                 metrics.log(iteration, iteration_time)
 
@@ -296,6 +304,11 @@ def main():
                     tf.summary.scalar("test reward", test_reward, step=iteration)
 
                 if test_reward > REWARD_THRESHOLD:
+                    _, frames = agent.test(demo=True)
+                    imageio.mimsave(f"BattleZone-{iteration}.gif", frames, fps=30)
+                    del frames
+                    gc.collect()
+                    
                     print("Problem Solved!")
 
     except KeyboardInterrupt:
@@ -303,7 +316,10 @@ def main():
     finally:
         envs.close()
         test_env.close()
-        model.save("a2c.keras")
+        demo_env.close()
+        train_summary_writer.close()
+        test_summary_writer.close()
+        keras.models.save_model(model, "a2c.keras")
 
 
 if __name__ == "__main__":
