@@ -1,31 +1,33 @@
-import tensorflow as tf
+import imageio
 import numpy as np
-from gymnasium.vector import SyncVectorEnv
-from a2c import Actor2Critic
+from tensorflow.keras.models import load_model
+import a2c
+
 from utils import make_atari_env
 
-envs = SyncVectorEnv([make_atari_env("ALE/BattleZone-v5") for _ in range(8)])
-envs.num_envs
-model = Actor2Critic((84, 84, 4), 18)
+env = make_atari_env("ALE/BattleZone-v5", render_mode="rgb_array")()
 
-state, _ = envs.reset()
+model = a2c.Actor2Critic((84, 84, 4), 18)
 
-train_rewards = tf.constant([[1.,  2. ],
- [0.,  3. ],
- [4.,  0. ]])
+model.build((84, 84, 4))
 
-train_dones = tf.constant(
-    [[False, False],
- [False, True ],
- [False, False]]
-)
+model.load_weights("a2c.weights.h5")
 
-boostrapped_values = tf.Variable([10.0, 0.0])
+model.save("a2c.keras")
 
-returns = tf.Variable(tf.zeros_initializer()(shape=train_rewards.shape, dtype=np.float32))
+model2 = load_model("a2c.keras")
 
-for i in tf.reverse(tf.range(3), axis=[0]):
-    boostrapped_values.assign(tf.where(train_dones[i], train_rewards[i], train_rewards[i] + 0.99 * boostrapped_values))
-    returns[i].assign(boostrapped_values)
+# frames = []
+# obs, _ = env.reset()
 
-print(returns)
+# for _ in range(5000):
+#     frame = env.render()
+#     frames.append(frame)
+#     obs = np.transpose(obs, axes=(1, 2, 0)) / 255.0
+#     action_logitis, _ = model(obs.astype(np.float32)[np.newaxis])
+#     action = action_logitis[0].numpy().argmax(axis=-1)
+#     obs, reward, terminated, truncated, _ = env.step(action)
+#     if terminated or truncated:
+#         break
+
+# imageio.mimsave("BatlleZone-demo.gif", frames, fps=30)

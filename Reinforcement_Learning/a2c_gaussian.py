@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import gymnasium as gym
 import imageio
 import numpy as np
@@ -6,20 +8,30 @@ import tqdm
 from tensorflow import keras
 
 class A2C_Guassian(keras.Model):
-    def __init__(self, observation_space: tuple[int,], action_space: int):
-        super().__init__()
+    def __init__(self, observation_space: tuple[int,], action_space: int, **kwargs):
+        super().__init__(**kwargs)
+        self.observation_space = observation_space
+        self.action_space = action_space
         self.shared_network = keras.Sequential([
-            keras.layers.InputLayer(observation_space),
+            keras.layers.InputLayer(self.observation_space),
             keras.layers.Dense(512, activation="relu"),
             keras.layers.Dense(256, activation="relu")
         ])
-        self.actor_mu = keras.layers.Dense(action_space, activation="tanh")
-        self.actor_std = keras.layers.Dense(action_space, activation="softmax")
+        self.actor_mu = keras.layers.Dense(self.action_space, activation="tanh")
+        self.actor_std = keras.layers.Dense(self.action_space, activation="softmax")
         self.critic = keras.layers.Dense(1)
 
     def call(self, obs):
         x = self.shared_network(obs)
         return self.actor_mu(x), self.actor_std(x), self.critic(x)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "observation_space": self.observation_space,
+            "action_space": self.action_space
+        })
+        return config
 
 class Agent:
     def __init__(self, env, test_env, demo_env, model, optimizer, loss_fn, gamma, n_steps, beta):
@@ -113,17 +125,17 @@ class Agent:
 
     def test(self, demo=False):
         obs, _ = self.test_env.reset() if not demo else self.demo_env.reset()
-        frames = []
         total_reward = 0
+        frames = []
         while True:
             if demo:
+                obs = obs[np.newaxis]
                 frame = self.demo_env.render()
                 frames.append(frame)
-                obs = obs[np.newaxis]
             actions, _, _ = self.model(obs)
             actions = actions[:].numpy()
             clipped_actions = np.clip(actions, -0.4, 0.4)
-            obs, reward, _, truncated, _ = self.test_env.step(actions) if not demo else self.demo_env.step(clipped_actions)
+            obs, reward, _, truncated, _ = self.test_env.step(actions) if not demo else self.demo_env.step(clipped_actions[0])
             total_reward += reward
             if np.any(truncated):
                 break
@@ -131,16 +143,20 @@ class Agent:
         episode_reward = np.mean(np.sum(total_reward, axis=-1)) if not demo else np.sum(total_reward)
         return episode_reward, frames
 
-
 def main():
+    envs, test_envs, demo_env = None, None, None
+
     try:
         envs = gym.make_vec("HumanoidStandup-v5", num_envs=8, vectorization_mode="async")
         test_envs = gym.make_vec("HumanoidStandup-v5", num_envs=10, vectorization_mode="async")
         demo_env = gym.make("HumanoidStandup-v5", render_mode="rgb_array")
-
+        
         obs = tf.random.normal((1, envs.observation_space.shape[1]))
         model = A2C_Guassian((envs.observation_space.shape[1],), envs.action_space.shape[1])
         _ = model(obs)
+
+        if Path("a2c_guassian.weights.h5").exists():
+            model.load_weights("a2c_guassian.weights.h5")
 
         value_loss_fn = keras.losses.MeanSquaredError()
         optimizer = keras.optimizers.Adam(learning_rate=0.001, clipnorm=0.1)
@@ -153,20 +169,27 @@ def main():
             print(train_reward)
 
             if iteration % 1000:
-                episode_reward, _ = agent.test()
+                episode_reward, frames = agent.test()
                 print(episode_reward)
-                # # There is a problem in how to render the demo I will search for the cause tomorrow
-                # _, frames = agent.test(demo=True)
-                # imageio.mimsave("StandingHumanoid-{iteration}.gif", frames, fps=30)
-                break
+
+                model.save_weights("a2c_guassian.weights.h5")
+
+                if episode_reward > 1000:
+                    model.save("a2c_guassian.keras")
+
+                    episode_reward, frames = agent.test(demo=True)
+                    imageio.mimsave("HumanoidStandup/a2c/demo-episode-{iteration}.gif", frames, fps=30)
 
 
     except KeyboardInterrupt:
         pass
     finally:
-        envs.close()
-        test_envs.close()
-        demo_env.close()
+        if envs is not None:
+            envs.close() 
+        if test_envs is not None:
+            test_envs.close()
+        if demo_env is not None:
+            demo_env.close()
 
 if __name__ == "__main__":
     main()

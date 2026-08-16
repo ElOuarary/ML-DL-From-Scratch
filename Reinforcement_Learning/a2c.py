@@ -2,6 +2,7 @@ import argparse
 import gc
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 from time import perf_counter
 
 import ale_py
@@ -24,18 +25,20 @@ def build_arg_parser():
     arg_parser.add_argument("--entropy-beta", default=0.01, type=float)
     arg_parser.add_argument("--num-steps", default=5, type=int)
     arg_parser.add_argument("--train-iteration", default=100_000, type=int)
-    arg_parser.add_argument("--log-interval", default=1000, type=int)
+    arg_parser.add_argument("--log-interval", default=1_000, type=int)
     arg_parser.add_argument("--reward-threshold", default=5_000, type=float)
-    arg_parser.add_argument("--test-steps", default=5000, type=int)
+    arg_parser.add_argument("--test-steps", default=5_000, type=int)
     return arg_parser
 
-
+@keras.saving.register_keras_serializable(package="a2cmodel", name="A2C_Model")
 class Actor2Critic(keras.Model):
-    def __init__(self, observation_space: tuple[int, int, int], action_space: int):
-        super().__init__()
+    def __init__(self, observation_space: tuple[int, int, int], action_space: int, **kwargs):
+        super().__init__(**kwargs)
+        self.observation_space = observation_space
+        self.action_space = action_space
         self.shared_network = keras.models.Sequential(
             [
-                keras.layers.InputLayer(observation_space),
+                keras.layers.InputLayer(self.observation_space),
                 keras.layers.Conv2D(32, kernel_size=8, strides=4, activation="relu"),
                 keras.layers.Conv2D(64, kernel_size=4, strides=2, activation="relu"),
                 keras.layers.Conv2D(64, kernel_size=3, strides=1, activation="relu"),
@@ -43,12 +46,20 @@ class Actor2Critic(keras.Model):
                 keras.layers.Dense(512, activation="relu"),
             ]
         )
-        self.actor = keras.layers.Dense(action_space)
+        self.actor = keras.layers.Dense(self.action_space)
         self.critic = keras.layers.Dense(1)
 
     def call(self, obs: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
         x = self.shared_network(obs)
         return self.actor(x), self.critic(x)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "observation_space": self.observation_space,
+            "action_space": self.action_space
+        })
+        return config
 
 
 class Agent:
@@ -82,7 +93,7 @@ class Agent:
 
     def collect_rollout(
         self, states: np.ndarray
-    ) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+    ) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, np.ndarray]:
         train_states = np.zeros(shape=(self.n_steps, *self.obs_shape), dtype=np.float32)
         train_actions = np.zeros(
             shape=(self.n_steps, self.num_envs), dtype=np.int32
@@ -137,6 +148,7 @@ class Agent:
                 ),
                 dtype=tf.float32,
             ),
+            np.mean(np.sum(train_rewards, axis=0))
         )
 
     def compute_loss(
@@ -197,13 +209,13 @@ class Agent:
             if self.current_states is None
             else (self.current_states, None)
         )
-        states, actions, returns = self.collect_rollout(current_states)
+        states, actions, returns, rewards = self.collect_rollout(current_states)
         loss, actor_loss, critic_loss, entropy_loss = self.train_step(
             states, actions, returns
         )
         end = perf_counter()
         return (
-            np.mean(returns),
+            rewards,
             loss,
             actor_loss,
             critic_loss,
@@ -217,13 +229,13 @@ class Agent:
         total_reward = 0
         for _ in range(self.test_steps):
             if demo:
-                frame = self.test_env.render()
+                frame = self.demo_env.render()
                 frames.append(frame)
             states = np.transpose(states, axes=(1, 2, 0))[np.newaxis] if demo else np.transpose(states, axes=(0, 2, 3, 1))
             states = states.astype(np.float32) / 255.0
             action_logits, _ = self.model(states, training=False)
             optimal_action = tf.argmax(action_logits, axis=-1).numpy()
-            states, reward, terminated, truncated, _ = self.test_env.step(
+            states, reward, terminated, _, _ = self.test_env.step(
                 optimal_action[0] if demo else optimal_action
             )
             total_reward += reward
@@ -255,6 +267,9 @@ def main():
     dummy_input = tf.zeros((1, 84, 84, 4))
     _ = model(dummy_input)
 
+    if Path("a2c.weights.h5").exists():
+        model.load_weights("a2c.weights.h5")
+
     critic_loss_fn = keras.losses.Huber()
     optimizer = keras.optimizers.Nadam(learning_rate=ALPHA, clipnorm=0.1)
 
@@ -281,6 +296,7 @@ def main():
                 entropy_loss,
                 iteration_time,
             ) = agent.learn_from_episode()
+
             moving_average_reward.append(average_reward)
             t.set_postfix(
                 episode_reward=average_reward,
@@ -303,13 +319,16 @@ def main():
                 with test_summary_writer.as_default():
                     tf.summary.scalar("test reward", test_reward, step=iteration)
 
+                model.save_weights("a2c.weights.h5")
+
                 if test_reward > REWARD_THRESHOLD:
                     _, frames = agent.test(demo=True)
-                    imageio.mimsave(f"BattleZone-{iteration}.gif", frames, fps=30)
+                    imageio.mimsave(f"./BattleZone/episode-{iteration}.gif", frames, fps=30)
                     del frames
                     gc.collect()
-                    
+
                     print("Problem Solved!")
+                    model.save("a2c.keras")
 
     except KeyboardInterrupt:
         pass
