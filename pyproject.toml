@@ -9,6 +9,7 @@ dependencies = [
     "arcade>=3.3.3",
     "gymnasium[box2d,classic-control,classiccontrol,mujoco]>=1.3.0",
     "imageio>=2.37.3",
+    "keras>=3.14.1",
     "matplotlib>=3.10.9",
     "numpy>=2.4.4",
     "pandas>=3.0.5",
@@ -27,6 +28,7 @@ value_iteration = "Reinforcement_Learning.value_iteration:main"
 tabular_q_learning = "Reinforcement_Learning.tabular_q_learning:main"
 deep_q_learning = "Reinforcement_Learning.deep_q_learning:main"
 reinforce = "Reinforcement_Learning.reinforce:main"
+a2c = "Reinforcement_Learning.a2c:main"
 
 [tool.uv]
 package = true

@@ -8,11 +8,11 @@ from time import perf_counter
 import ale_py
 import gymnasium as gym
 import imageio
+import keras
 import numpy as np
 import tensorflow as tf
 import tqdm
 from gymnasium.vector import AsyncVectorEnv
-from tensorflow import keras
 
 from Reinforcement_Learning.utils import MetricLog, make_atari_env
 
@@ -31,23 +31,23 @@ def build_arg_parser():
     return arg_parser
 
 @keras.saving.register_keras_serializable(package="a2cmodel", name="A2C_Model")
-class Actor2Critic(keras.Model):
+class Actor2Critic(tf.keras.Model):
     def __init__(self, observation_space: tuple[int, int, int], action_space: int, **kwargs):
         super().__init__(**kwargs)
         self.observation_space = observation_space
         self.action_space = action_space
-        self.shared_network = keras.models.Sequential(
+        self.shared_network = tf.keras.models.Sequential(
             [
-                keras.layers.InputLayer(self.observation_space),
-                keras.layers.Conv2D(32, kernel_size=8, strides=4, activation="relu"),
-                keras.layers.Conv2D(64, kernel_size=4, strides=2, activation="relu"),
-                keras.layers.Conv2D(64, kernel_size=3, strides=1, activation="relu"),
-                keras.layers.Flatten(),
-                keras.layers.Dense(512, activation="relu"),
+                tf.keras.layers.InputLayer(self.observation_space),
+                tf.keras.layers.Conv2D(32, kernel_size=8, strides=4, activation="relu"),
+                tf.keras.layers.Conv2D(64, kernel_size=4, strides=2, activation="relu"),
+                tf.keras.layers.Conv2D(64, kernel_size=3, strides=1, activation="relu"),
+                tf.keras.layers.Flatten(),
+                tf.keras.layers.Dense(512, activation="relu"),
             ]
         )
-        self.actor = keras.layers.Dense(self.action_space)
-        self.critic = keras.layers.Dense(1)
+        self.actor = tf.keras.layers.Dense(self.action_space)
+        self.critic = tf.keras.layers.Dense(1)
 
     def call(self, obs: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
         x = self.shared_network(obs)
@@ -234,12 +234,10 @@ class Agent:
             states = np.transpose(states, axes=(1, 2, 0))[np.newaxis] if demo else np.transpose(states, axes=(0, 2, 3, 1))
             states = states.astype(np.float32) / 255.0
             action_logits, _ = self.model(states, training=False)
-            optimal_action = tf.argmax(action_logits, axis=-1).numpy()
-            states, reward, terminated, _, _ = self.test_env.step(
-                optimal_action[0] if demo else optimal_action
-            )
+            optimal_action = action_logits.numpy().argmax(axis=-1)
+            states, reward, terminated, _, _ = self.test_env.step(optimal_action) if not demo else self.demo_env.step(optimal_action[0])
             total_reward += reward
-            if not np.all(terminated):
+            if np.any(terminated):
                 break
         return np.mean(total_reward), frames
 
@@ -260,7 +258,7 @@ def main():
     TEST_STEPS = args.test_steps
 
     envs = AsyncVectorEnv([make_atari_env("ALE/BattleZone-v5") for _ in range(NUM_ENVS)])
-    test_env = AsyncVectorEnv([make_atari_env("ALE/BattleZone-v5", render_mode="rgb_array") for _ in range(5)])
+    test_env = AsyncVectorEnv([make_atari_env("ALE/BattleZone-v5") for _ in range(5)])
     demo_env = make_atari_env("ALE/BattleZone-v5", render_mode="rgb_array")()
 
     model = Actor2Critic((84, 84, 4), 18)
@@ -270,8 +268,8 @@ def main():
     if Path("a2c.weights.h5").exists():
         model.load_weights("a2c.weights.h5")
 
-    critic_loss_fn = keras.losses.Huber()
-    optimizer = keras.optimizers.Nadam(learning_rate=ALPHA, clipnorm=0.1)
+    critic_loss_fn = tf.keras.losses.Huber()
+    optimizer = tf.keras.optimizers.Nadam(learning_rate=ALPHA, clipnorm=0.1)
 
     agent = Agent(
         envs, test_env, demo_env, model, optimizer, critic_loss_fn, GAMMA, ENTROPY_BETA, NUM_STEPS, TEST_STEPS
@@ -298,9 +296,10 @@ def main():
             ) = agent.learn_from_episode()
 
             moving_average_reward.append(average_reward)
+            running_reward = np.mean(moving_average_reward)
             t.set_postfix(
                 episode_reward=average_reward,
-                running_reward=np.mean(moving_average_reward),
+                running_reward=running_reward,
             )
 
             if iteration % LOG_INTERVAL == 0:
@@ -309,7 +308,7 @@ def main():
                 metrics.log(iteration, iteration_time)
 
                 with train_summary_writer.as_default():
-                    tf.summary.scalar("train reward", average_reward, step=iteration)
+                    tf.summary.scalar("train reward", running_reward, step=iteration)
                     tf.summary.scalar("actor loss", actor_loss, step=iteration)
                     tf.summary.scalar("critic loss", critic_loss, step=iteration)
                     tf.summary.scalar("entropy loss", entropy_loss, step=iteration)
@@ -328,7 +327,7 @@ def main():
                     gc.collect()
 
                     print("Problem Solved!")
-                    model.save("a2c.keras")
+                    model.save("a2c.tf.keras")
 
     except KeyboardInterrupt:
         pass
@@ -338,7 +337,7 @@ def main():
         demo_env.close()
         train_summary_writer.close()
         test_summary_writer.close()
-        keras.models.save_model(model, "a2c.keras")
+        tf.keras.models.save_model(model, "a2c.tf.keras")
 
 
 if __name__ == "__main__":
