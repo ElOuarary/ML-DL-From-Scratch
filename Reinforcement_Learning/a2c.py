@@ -21,7 +21,7 @@ def build_arg_parser():
     arg_parser = argparse.ArgumentParser()
     arg_parser.add_argument("--num-envs", default=8, type=int)
     arg_parser.add_argument("--gamma", default=0.99, type=float)
-    arg_parser.add_argument("--alpha", default=0.001, type=float)
+    arg_parser.add_argument("--alpha", default=0.0001, type=float)
     arg_parser.add_argument("--entropy-beta", default=0.01, type=float)
     arg_parser.add_argument("--num-steps", default=5, type=int)
     arg_parser.add_argument("--train-iteration", default=100_000, type=int)
@@ -269,7 +269,7 @@ def main():
         model.load_weights("a2c.weights.h5")
 
     critic_loss_fn = tf.keras.losses.Huber()
-    optimizer = tf.keras.optimizers.Nadam(learning_rate=ALPHA, clipnorm=0.1)
+    optimizer = tf.keras.optimizers.Nadam(learning_rate=ALPHA, clipnorm=0.1, gradient_accumulation_steps=2)
 
     agent = Agent(
         envs, test_env, demo_env, model, optimizer, critic_loss_fn, GAMMA, ENTROPY_BETA, NUM_STEPS, TEST_STEPS

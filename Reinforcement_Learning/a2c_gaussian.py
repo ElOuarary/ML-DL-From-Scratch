@@ -1,12 +1,17 @@
+from collections import deque
+from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 
 import gymnasium as gym
-import imageio
+import keras
 import numpy as np
 import tensorflow as tf
 import tqdm
-from tensorflow import keras
 
+from utils import MetricLog
+
+@keras.saving.register_keras_serializable(package="a2cguassian_model", name="A2CGuassian")
 class A2C_Guassian(keras.Model):
     def __init__(self, observation_space: tuple[int,], action_space: int, **kwargs):
         super().__init__(**kwargs)
@@ -34,13 +39,12 @@ class A2C_Guassian(keras.Model):
         return config
 
 class Agent:
-    def __init__(self, env, test_env, demo_env, model, optimizer, loss_fn, gamma, n_steps, beta):
+    def __init__(self, env, test_env, model, optimizer, loss_fn, gamma, n_steps, beta):
         self.env = env
         self.observation_shape = self.env.observation_space.shape[1]
         self.action_shape = self.env.action_space.shape[1]
         self.obs, _ = env.reset()
         self.test_env = test_env
-        self.demo_env = demo_env
         self.model = model
         self.optimizer = optimizer
         self.loss_fn = loss_fn
@@ -56,7 +60,6 @@ class Agent:
         next_obs, reward, _, truncated, _ = self.env.step(action)
         return next_obs.astype(np.float64), reward.astype(np.float32), truncated.astype(np.bool)
 
-    # Need to be decomposed into smaller function especially for computing rollout
     def collect_data(self, obs=tf.Tensor) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
         initial_shape = obs.shape
 
@@ -87,19 +90,22 @@ class Agent:
         rewards = rewards.stack()
         dones = dones.stack()
 
-        _, _, next_state_value = self.model(obs)
-        boostraped_value = next_state_value[:, 0]
-        boostrapped_shape = boostraped_value.shape
+        return tf.reshape(log_probabilities, shape=(-1, self.action_shape)), tf.reshape(state_values, shape=(-1, 1)), rewards, dones, tf.reshape(actions_deviation, shape=(-1, self.action_shape)), obs
+
+    def compute_boostrapped_returns(self, next_obs: tf.Tensor, rewards: tf.Tensor, dones: tf.Tensor) -> tf.Tensor:
+        _, _, next_state_value = self.model(next_obs)
+        boostrapped_value = next_state_value[:, 0]
+        boostrapped_shape = boostrapped_value.shape
 
         returns = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
+        for i in tf.reverse(tf.range(self.n_steps), axis=[-1]):
+            boostrapped_value = tf.where(dones[i], rewards[i] + self.gamma * boostrapped_value, boostrapped_value)
+            returns = returns.write(i, boostrapped_value)
+            boostrapped_value.set_shape(boostrapped_shape)
 
-        for i in tf.reverse(tf.range(self.n_steps), axis=[0]):
-            boostraped_value = tf.where(dones[i], rewards[i], rewards[i] + self.gamma * boostraped_value)
-            returns = returns.write(i, boostraped_value)
-            boostraped_value.set_shape(boostrapped_shape)
         returns = returns.stack()
 
-        return tf.reshape(log_probabilities, shape=(-1, self.action_shape)), tf.reshape(state_values, shape=(-1, 1)), tf.reshape(rewards, shape=(-1, 1)), tf.reshape(actions_deviation, shape=(-1, self.action_shape))
+        return tf.reshape(returns, shape=(-1, 1))
 
     def compute_loss(self, log_probability, state_value, reward, action_deviation):
         advantage = tf.stop_gradient((reward - state_value))
@@ -112,8 +118,9 @@ class Agent:
     @tf.function(input_signature=[tf.TensorSpec(shape=(None, 348), dtype=tf.float64)])
     def train_step(self, obs: tf.Tensor):
         with tf.GradientTape() as tape:
-            log_probabilities, state_values, rewards, actions_deviation = self.collect_data(obs)
-            loss, policy_loss, value_loss, entropy_loss = self.compute_loss(log_probabilities, state_values, rewards, actions_deviation)
+            log_probabilities, state_values, rewards, dones, actions_deviation, obs = self.collect_data(obs)
+            returns = self.compute_boostrapped_returns(obs, rewards, dones)
+            loss, policy_loss, value_loss, entropy_loss = self.compute_loss(log_probabilities, state_values, returns, actions_deviation)
 
         grad = tape.gradient(loss, self.model.trainable_variables)
         self.optimizer.apply_gradients(zip(grad, self.model.trainable_variables))
@@ -123,33 +130,29 @@ class Agent:
         obs, _ = self.env.reset() if self.obs is None else (self.obs, None)
         return self.train_step(obs)
 
-    def test(self, demo=False):
-        obs, _ = self.test_env.reset() if not demo else self.demo_env.reset()
+    def test(self):
+        obs, _ = self.test_env.reset()
         total_reward = 0
-        frames = []
+
         while True:
-            if demo:
-                obs = obs[np.newaxis]
-                frame = self.demo_env.render()
-                frames.append(frame)
             actions, _, _ = self.model(obs)
             actions = actions[:].numpy()
             clipped_actions = np.clip(actions, -0.4, 0.4)
-            obs, reward, _, truncated, _ = self.test_env.step(actions) if not demo else self.demo_env.step(clipped_actions[0])
+            obs, reward, _, truncated, _ = self.test_env.step(clipped_actions)
             total_reward += reward
             if np.any(truncated):
                 break
 
-        episode_reward = np.mean(np.sum(total_reward, axis=-1)) if not demo else np.sum(total_reward)
-        return episode_reward, frames
+        episode_reward = np.mean(np.sum(total_reward, axis=-1))
+        return episode_reward
 
 def main():
     envs, test_envs, demo_env = None, None, None
 
     try:
-        envs = gym.make_vec("HumanoidStandup-v5", num_envs=8, vectorization_mode="async")
+        metrics = MetricLog("humanoidStandup.csv")
+        envs = gym.make_vec("HumanoidStandup-v5", num_envs=16, vectorization_mode="async")
         test_envs = gym.make_vec("HumanoidStandup-v5", num_envs=10, vectorization_mode="async")
-        demo_env = gym.make("HumanoidStandup-v5", render_mode="rgb_array")
         
         obs = tf.random.normal((1, envs.observation_space.shape[1]))
         model = A2C_Guassian((envs.observation_space.shape[1],), envs.action_space.shape[1])
@@ -161,29 +164,55 @@ def main():
         value_loss_fn = keras.losses.MeanSquaredError()
         optimizer = keras.optimizers.Adam(learning_rate=0.001, clipnorm=0.1)
 
-        agent = Agent(envs, test_envs, demo_env, model, optimizer, value_loss_fn, 0.99, 50, 0.01)
+        agent = Agent(envs, test_envs, demo_env, model, optimizer, value_loss_fn, 0.99, 10, 0.01)
 
-        t = tqdm.trange(10_000)
+        current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
+        train_logs_dir = "logs/A2C_Guassian/train/" + current_time
+        test_logs_dir = "logs/A2C_Guassian/test/" + current_time
+
+        train_file_writer = tf.summary.create_file_writer(train_logs_dir)
+        test_file_wrirter = tf.summary.create_file_writer(test_logs_dir)
+
+        moving_average_reward: deque = deque(maxlen=500)
+        t = tqdm.trange(1_00_000)
         for iteration in t:
+            start = perf_counter()
             train_reward, loss, policy_loss, value_loss, entropy_loss = agent.learn()
-            print(train_reward)
+            end = perf_counter() - start
 
-            if iteration % 1000:
-                episode_reward, frames = agent.test()
-                print(episode_reward)
+            moving_average_reward.append(train_reward)
+            running_reward = np.mean(moving_average_reward)
+
+            t.set_postfix(
+                episode_reward=train_reward.numpy(),
+                running_reward=running_reward
+            )
+
+            if iteration % 1000 == 0:
+                episode_reward, _ = agent.test()
+                metrics.log(iteration, end)
+
+                with train_file_writer.as_default():
+                    tf.summary.scalar("train reward", running_reward, step=iteration)
+                    tf.summary.scalar("loss", loss, step=iteration)
+                    tf.summary.scalar("policy loss", policy_loss, step=iteration)
+                    tf.summary.scalar("value loss", value_loss, step=iteration)
+                    tf.summary.scalar("entropy loss", entropy_loss, step=iteration)
+
+                with test_file_wrirter.as_default():
+                    tf.summary.scalar("test reward", episode_reward, step=iteration)
 
                 model.save_weights("a2c_guassian.weights.h5")
 
-                if episode_reward > 1000:
+                if episode_reward > 50_000:
                     model.save("a2c_guassian.keras")
-
-                    episode_reward, frames = agent.test(demo=True)
-                    imageio.mimsave("HumanoidStandup/a2c/demo-episode-{iteration}.gif", frames, fps=30)
-
+                    print("Problem Solved")
 
     except KeyboardInterrupt:
         pass
     finally:
+        train_file_writer.close()
+        test_file_wrirter.close()
         if envs is not None:
             envs.close() 
         if test_envs is not None:

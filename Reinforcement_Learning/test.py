@@ -1,36 +1,30 @@
-from gymnasium.vector import AsyncVectorEnv
+import os
+os.environ["MUJOCO_GL"] = "egl"
+import gymnasium as gym
+env = gym.make("HumanoidStandup-v5", render_mode="rgb_array")
+
+import imageio
+
 import numpy as np
 from tensorflow.keras.models import load_model
-import a2c
-
-from utils import make_atari_env
-
-test_env = AsyncVectorEnv([make_atari_env("ALE/BattleZone-v5") for _ in range(5)])
-
-model = a2c.Actor2Critic((84, 84, 4), 18)
-
-model.build((84, 84, 4))
-
-model.load_weights("a2c.weights.h5")
-
-model.save("a2c.keras")
-
-model2 = load_model("a2c.keras")
+from a2c_gaussian import A2C_Guassian
 
 
-# imageio.mimsave("BatlleZone-demo.gif", frames, fps=30)
-states, _ = test_env.reset()
+model = A2C_Guassian(env.observation_space.shape, env.action_space.shape[0])
 
+model.build(env.observation_space.sample()[np.newaxis])
+
+obs, _ = env.reset()
+frames = []
 total_reward = 0
 while True:
-    states = np.transpose(states, axes=(0, 2, 3, 1))
-    states = states.astype(np.float32) / 255.0
-    action_logits, _ = model(states, training=False)
-    optimal_action = action_logits.numpy().argmax(axis=-1)
-    states, reward, terminated, _, _ = test_env.step(optimal_action)
+    frame = env.render()
+    frames.append(frame)
+    optimal_action, _, _ = model(obs[np.newaxis])
+    states, reward, _, truncated, _ = env.step(optimal_action[0].numpy())
     total_reward += reward
-    print(terminated)
-    if np.any(terminated):
+
+    if truncated:
         break
 
-print(np.mean(total_reward))
+imageio.mimsave("HumanoidStandup/demo.gif", frames, fps=30)
