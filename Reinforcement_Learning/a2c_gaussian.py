@@ -1,3 +1,5 @@
+import argparse
+
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +12,19 @@ import tensorflow as tf
 import tqdm
 
 from utils import MetricLog
+
+def build_arg_parser():
+    arg_parser = argparse.ArgumentParser()
+    arg_parser.add_argument("--num-envs", default=8, type=int)
+    arg_parser.add_argument("--gamma", default=0.99, type=float)
+    arg_parser.add_argument("--alpha", default=0.0001, type=float)
+    arg_parser.add_argument("--entropy-beta", default=0.01, type=float)
+    arg_parser.add_argument("--num-steps", default=5, type=int)
+    arg_parser.add_argument("--train-iteration", default=1_000_000, type=int)
+    arg_parser.add_argument("--log-interval", default=1_000, type=int)
+    arg_parser.add_argument("--reward-threshold", default=500_000, type=float)
+    arg_parser.add_argument("--test-steps", default=5_000, type=int)
+    return arg_parser
 
 @keras.saving.register_keras_serializable(package="a2cguassian_model", name="A2CGuassian")
 class A2C_Guassian(keras.Model):
@@ -112,7 +127,7 @@ class Agent:
         advantage = advantage - tf.reduce_mean(advantage) / (tf.math.reduce_std(advantage) + 1e-8)
         policy_loss = tf.reduce_mean(advantage * log_probability)
         value_loss = self.loss_fn(state_value, reward)
-        entropy_loss = tf.reduce_mean(0.5 * tf.math.log(2 * np.pi * action_deviation ** 2))
+        entropy_loss = self.beta * tf.reduce_mean(tf.math.log(2 * np.pi * action_deviation ** 2))
         return policy_loss + value_loss + entropy_loss, policy_loss, value_loss, entropy_loss
 
     @tf.function(input_signature=[tf.TensorSpec(shape=(None, 348), dtype=tf.float64)])
@@ -149,9 +164,21 @@ class Agent:
 def main():
     envs, test_envs, demo_env = None, None, None
 
+    arg_parser = build_arg_parser()
+    args = arg_parser.parse_args()
+
+    NUM_ENVS = args.num_envs
+    GAMMA = args.gamma
+    ALPHA = args.alpha
+    ENTROPY_BETA = args.entropy_beta
+    NUM_STEPS = args.num_steps
+    TRAIN_ITERATION = args.train_iteration
+    REWARD_THRESHOLD = args.reward_threshold
+    TEST_STEPS = args.test_steps
+
     try:
         metrics = MetricLog("humanoidStandup.csv")
-        envs = gym.make_vec("HumanoidStandup-v5", num_envs=16, vectorization_mode="async")
+        envs = gym.make_vec("HumanoidStandup-v5", num_envs=NUM_ENVS, vectorization_mode="async")
         test_envs = gym.make_vec("HumanoidStandup-v5", num_envs=10, vectorization_mode="async")
         
         obs = tf.random.normal((1, envs.observation_space.shape[1]))
@@ -164,7 +191,7 @@ def main():
         value_loss_fn = keras.losses.MeanSquaredError()
         optimizer = keras.optimizers.Adam(learning_rate=0.001, clipnorm=0.1)
 
-        agent = Agent(envs, test_envs, demo_env, model, optimizer, value_loss_fn, 0.99, 10, 0.01)
+        agent = Agent(envs, test_envs, model, optimizer, value_loss_fn, GAMMA, NUM_STEPS, ENTROPY_BETA)
 
         current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
         train_logs_dir = "logs/A2C_Guassian/train/" + current_time
@@ -174,7 +201,7 @@ def main():
         test_file_wrirter = tf.summary.create_file_writer(test_logs_dir)
 
         moving_average_reward: deque = deque(maxlen=500)
-        t = tqdm.trange(1_00_000)
+        t = tqdm.trange(TRAIN_ITERATION)
         for iteration in t:
             start = perf_counter()
             train_reward, loss, policy_loss, value_loss, entropy_loss = agent.learn()
@@ -188,8 +215,8 @@ def main():
                 running_reward=running_reward
             )
 
-            if iteration % 1000 == 0:
-                episode_reward, _ = agent.test()
+            if iteration % TEST_STEPS == 0:
+                episode_reward = agent.test()
                 metrics.log(iteration, end)
 
                 with train_file_writer.as_default():
@@ -204,7 +231,7 @@ def main():
 
                 model.save_weights("a2c_guassian.weights.h5")
 
-                if episode_reward > 50_000:
+                if episode_reward > REWARD_THRESHOLD:
                     model.save("a2c_guassian.keras")
                     print("Problem Solved")
 

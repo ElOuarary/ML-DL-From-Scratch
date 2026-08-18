@@ -27,4 +27,4 @@ while True:
     if truncated:
         break
 
-imageio.mimsave("HumanoidStandup/demo.gif", frames, fps=30)
+imageio.mimsave("HumanoidStandup/demo-2.gif", frames, fps=30)
