@@ -101,11 +101,11 @@ class Agent:
         for i in tf.range(self.n_steps):
             mu, std, state_value = self.predict(obs)
             actions = tf.random.normal(
-                self.env.action_space.shape, mean=mu, stddev=std, dtype=tf.float32
+                tf.shape(mu), mean=mu, stddev=std, dtype=tf.float32
             )
-            log_probability = tf.math.pow(actions - mu, 2) / (
+            log_probability = -(tf.math.pow(actions - mu, 2) / (
                 2 *std**2 + 1e-5
-            ) + 0.5 * tf.math.log(2 * np.pi * (std + 1e-5) ** 2)
+            ) + 0.5 * tf.math.log(2 * np.pi * (std + 1e-5) ** 2))
             actions = tf.clip_by_value(actions, clip_value_min=-0.4, clip_value_max=0.4)
             obs, reward, done = tf.numpy_function(
                 self.env_step,
@@ -139,7 +139,7 @@ class Agent:
     def compute_boostrapped_returns(
         self, next_obs: tf.Tensor, rewards: tf.Tensor, dones: tf.Tensor
     ) -> tf.Tensor:
-        _, _, next_state_value = self.model(next_obs)
+        _, _, next_state_value = tf.stop_gradient(self.model(next_obs))
         boostrapped_value = next_state_value[:, 0]
         boostrapped_shape = boostrapped_value.shape
 
@@ -166,10 +166,10 @@ class Agent:
         advantage = (advantage - tf.reduce_mean(advantage)) / (
             tf.math.reduce_std(advantage) + 1e-8
         )
-        policy_loss = -tf.reduce_mean(advantage * log_probability)
+        policy_loss = tf.reduce_mean(advantage * tf.reduce_sum(log_probability, axis=-1, keepdims=True))
         value_loss = self.loss_fn(state_value, reward)
         entropy_loss = self.beta * tf.reduce_mean(
-            0.5 * tf.math.log(2 * np.pi * np.e * action_deviation**2) + 0.5
+            0.5 * tf.math.log(2 * np.pi * np.e * action_deviation**2)
         )
         return (
             policy_loss + value_loss - entropy_loss,
@@ -192,7 +192,7 @@ class Agent:
         grad = tape.gradient(loss, self.model.trainable_variables)
         self.optimizer.apply_gradients(zip(grad, self.model.trainable_variables))
         return (
-            tf.reduce_mean(tf.reduce_sum(rewards, axis=-1)),
+            tf.reduce_mean(tf.reduce_sum(rewards, axis=0)),
             loss,
             policy_loss,
             value_loss,
@@ -211,15 +211,14 @@ class Agent:
         active = np.full(self.test_env.num_envs, np.True_)
         total_reward = np.zeros(self.test_env.num_envs)
 
-        while np.all(active):
+        while np.any(active):
             actions, _, _ = self.model(obs)
             actions = actions[:].numpy()
             clipped_actions = np.clip(actions, -0.4, 0.4)
             obs, reward, _, truncated, _ = self.test_env.step(clipped_actions)
             total_reward += reward * active
             active = np.logical_and(active, np.logical_not(truncated))
-            if np.all(active):
-                break
+
         episode_reward = np.mean(total_reward)
         return episode_reward
 
