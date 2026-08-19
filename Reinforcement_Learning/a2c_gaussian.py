@@ -43,7 +43,7 @@ class A2C_Guassian(keras.Model):
             ]
         )
         self.actor_mu = keras.layers.Dense(self.action_space, activation="tanh")
-        self.actor_std = keras.layers.Dense(self.action_space, activation="softmax")
+        self.actor_std = keras.layers.Dense(self.action_space, activation="softplus")
         self.critic = keras.layers.Dense(1)
 
     def call(self, obs: np.ndarray | tf.Tensor):
@@ -88,7 +88,7 @@ class Agent:
         )
 
     def collect_data(
-        self, obs=tf.Tensor
+        self, obs: tf.Tensor
     ) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
         initial_shape = obs.shape
 
@@ -103,6 +103,9 @@ class Agent:
             actions = tf.random.normal(
                 self.env.action_space.shape, mean=mu, stddev=std, dtype=tf.float32
             )
+            log_probability = tf.math.pow(actions - mu, 2) / (
+                2 *std**2 + 1e-5
+            ) + 0.5 * tf.math.log(2 * np.pi * (std + 1e-5) ** 2)
             actions = tf.clip_by_value(actions, clip_value_min=-0.4, clip_value_max=0.4)
             obs, reward, done = tf.numpy_function(
                 self.env_step,
@@ -110,9 +113,6 @@ class Agent:
                 Tout=[tf.float64, tf.float32, tf.bool],
             )
 
-            log_probability = tf.math.pow(actions - mu, 2) / 2 * (
-                std**2 + 1e-5
-            ) + 0.5 * tf.math.log(2 * np.pi * (std + 1e-5) ** 2)
             log_probabilities = log_probabilities.write(i, log_probability)
             actions_deviation = actions_deviation.write(i, std + 1e-5)
             state_values = state_values.write(i, state_value)
@@ -146,7 +146,7 @@ class Agent:
         returns = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
         for i in tf.reverse(tf.range(self.n_steps), axis=[-1]):
             boostrapped_value = tf.where(
-                dones[i], rewards[i] + self.gamma * boostrapped_value, boostrapped_value
+                dones[i], rewards[i], rewards[i] + self.gamma * boostrapped_value
             )
             returns = returns.write(i, boostrapped_value)
             boostrapped_value.set_shape(boostrapped_shape)
@@ -163,28 +163,28 @@ class Agent:
         action_deviation: tf.Tensor,
     ) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
         advantage = tf.stop_gradient(reward - state_value)
-        advantage = advantage - tf.reduce_mean(advantage) / (
+        advantage = (advantage - tf.reduce_mean(advantage)) / (
             tf.math.reduce_std(advantage) + 1e-8
         )
-        policy_loss = tf.reduce_mean(advantage * log_probability)
+        policy_loss = -tf.reduce_mean(advantage * log_probability)
         value_loss = self.loss_fn(state_value, reward)
         entropy_loss = self.beta * tf.reduce_mean(
-            0.5 * tf.math.log(2 * np.pi * action_deviation**2)
+            0.5 * tf.math.log(2 * np.pi * np.e * action_deviation**2) + 0.5
         )
         return (
-            policy_loss + value_loss + entropy_loss,
+            policy_loss + value_loss - entropy_loss,
             policy_loss,
             value_loss,
             entropy_loss,
         )
 
     @tf.function(input_signature=[tf.TensorSpec(shape=(None, 348), dtype=tf.float64)])
-    def train_step(self, obs: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
+    def train_step(self, obs: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
         with tf.GradientTape() as tape:
-            log_probabilities, state_values, rewards, dones, actions_deviation, obs = (
+            log_probabilities, state_values, rewards, dones, actions_deviation, next_obs = (
                 self.collect_data(obs)
             )
-            returns = self.compute_boostrapped_returns(obs, rewards, dones)
+            returns = self.compute_boostrapped_returns(next_obs, rewards, dones)
             loss, policy_loss, value_loss, entropy_loss = self.compute_loss(
                 log_probabilities, state_values, returns, actions_deviation
             )
@@ -197,31 +197,35 @@ class Agent:
             policy_loss,
             value_loss,
             entropy_loss,
+            next_obs
         )
 
     def learn(self):
-        obs, _ = self.env.reset() if self.obs is None else (self.obs, None)
-        return self.train_step(obs)
+        self.obs, _ = self.env.reset() if self.obs is None else (self.obs, None)
+        rewards, loss, policy_loss, value_loss, entropy_loss, next_obs =  self.train_step(self.obs)
+        self.obs = next_obs.numpy()
+        return rewards, loss, policy_loss, value_loss, entropy_loss
 
     def test(self) -> np.ndarray:
         obs, _ = self.test_env.reset()
-        total_reward = 0
+        active = np.full(self.test_env.num_envs, np.True_)
+        total_reward = np.zeros(self.test_env.num_envs)
 
-        while True:
+        while np.all(active):
             actions, _, _ = self.model(obs)
             actions = actions[:].numpy()
             clipped_actions = np.clip(actions, -0.4, 0.4)
             obs, reward, _, truncated, _ = self.test_env.step(clipped_actions)
-            total_reward += reward
-            if np.any(truncated):
+            total_reward += reward * active
+            active = np.logical_and(active, np.logical_not(truncated))
+            if np.all(active):
                 break
-
-        episode_reward = np.mean(np.sum(total_reward, axis=-1))
+        episode_reward = np.mean(total_reward)
         return episode_reward
 
 
 def main():
-    envs, test_envs, demo_env = None, None, None
+    envs, test_envs = None, None
 
     arg_parser = build_arg_parser()
     args = arg_parser.parse_args()
@@ -272,7 +276,7 @@ def main():
         test_logs_dir = "logs/A2C_Guassian/test/" + current_time
 
         train_file_writer = tf.summary.create_file_writer(train_logs_dir)
-        test_file_wrirter = tf.summary.create_file_writer(test_logs_dir)
+        test_file_writer = tf.summary.create_file_writer(test_logs_dir)
 
         moving_average_reward: deque = deque(maxlen=500)
         t = tqdm.trange(TRAIN_ITERATION)
@@ -299,7 +303,7 @@ def main():
                     tf.summary.scalar("value loss", value_loss, step=iteration)
                     tf.summary.scalar("entropy loss", entropy_loss, step=iteration)
 
-                with test_file_wrirter.as_default():
+                with test_file_writer.as_default():
                     tf.summary.scalar("test reward", episode_reward, step=iteration)
 
                 model.save_weights("a2c_guassian.weights.h5")
@@ -312,13 +316,11 @@ def main():
         pass
     finally:
         train_file_writer.close()
-        test_file_wrirter.close()
+        test_file_writer.close()
         if envs is not None:
             envs.close()
         if test_envs is not None:
             test_envs.close()
-        if demo_env is not None:
-            demo_env.close()
 
 
 if __name__ == "__main__":
