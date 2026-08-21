@@ -54,26 +54,32 @@ class Agent:
         next_state = []
         continue_mask = []
         for i, reward, continue_ in zip(indices, rewards, continues):
+            j = i
             if continue_:
                 for j in range(i+1, min(i+self.n_steps, len(self.replay_buffer))):
                     reward += self.gamma ** (j-i) * self.replay_buffer[j].reward
                     if not self.replay_buffer[j].continue_mask:
                         break
+                next_state.append(self.replay_buffer[j].next_state)
+                continue_mask.append(self.replay_buffer[j].continue_mask if i+self.n_steps <= len(self.replay_buffer) else 0)
+            else:
+                next_state.append(self.replay_buffer[i].next_state)
+                continue_mask.append(self.replay_buffer[i].continue_mask)
             returns.append(reward)
-        return returns
+        return returns, next_state, continue_mask
 
     def sample_batch(self, batch_size):
         indices = np.random.choice(
             len(self.replay_buffer), batch_size, replace=False
         )
-        states, actions, rewards, next_states, continue_mask = zip(
+        states, actions, rewards, _, continue_mask = zip(
             *[self.replay_buffer[idx] for idx in indices]
         )
-        retruns = self.compute_returns(indices, rewards, continue_mask)
+        retruns, next_states, continue_mask = self.compute_returns(indices, rewards, continue_mask)
         states, actions, retruns, next_states, continue_mask = (
             tf.constant(states),
             tf.constant(actions),
-            tf.constant(rewards, dtype=tf.float32),
+            tf.constant(retruns, dtype=tf.float32),
             tf.constant(next_states),
             tf.constant(continue_mask, dtype=tf.float32),
         )
@@ -160,7 +166,7 @@ def main():
 
     loss_fn = keras.losses.Huber()
     optimizer = keras.optimizers.Nadam(learning_rate=alpha, clipnorm=1)
-    agent = Agent(env, 1, gamma, model, tg_model, loss_fn, optimizer, buffer_size)
+    agent = Agent(env, 1, gamma, model, tg_model, loss_fn, optimizer, 4, buffer_size) # Pass the n-steps argument from the command line
 
     current_time = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     train_logs_dir = "logs/dqn/LunarLander/train/" + current_time
