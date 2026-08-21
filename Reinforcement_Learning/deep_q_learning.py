@@ -14,7 +14,7 @@ Step = namedtuple(
 
 class Agent:
     def __init__(
-        self, env, epsilon, gamma, net, tg_net, loss_fn, optimizer, buffer_size
+        self, env, epsilon, gamma, net, tg_net, loss_fn, optimizer, n_steps,buffer_size
     ):
         self.env = env
         self.state, _ = self.env.reset()
@@ -25,6 +25,7 @@ class Agent:
         self.tg_net = tg_net
         self.loss_fn = loss_fn
         self.optimizer = optimizer
+        self.n_steps = n_steps
         self.replay_buffer = deque(maxlen=buffer_size)
 
     def explore(self):
@@ -48,6 +49,19 @@ class Agent:
         else:
             self.state = next_state
 
+    def compute_returns(self, indices, rewards, continues):
+        returns = []
+        next_state = []
+        continue_mask = []
+        for i, reward, continue_ in zip(indices, rewards, continues):
+            if continue_:
+                for j in range(i+1, min(i+self.n_steps, len(self.replay_buffer))):
+                    reward += self.gamma ** (j-i) * self.replay_buffer[j].reward
+                    if not self.replay_buffer[j].continue_mask:
+                        break
+            returns.append(reward)
+        return returns
+
     def sample_batch(self, batch_size):
         indices = np.random.choice(
             len(self.replay_buffer), batch_size, replace=False
@@ -55,14 +69,15 @@ class Agent:
         states, actions, rewards, next_states, continue_mask = zip(
             *[self.replay_buffer[idx] for idx in indices]
         )
-        states, actions, rewards, next_states, continue_mask = (
+        retruns = self.compute_returns(indices, rewards, continue_mask)
+        states, actions, retruns, next_states, continue_mask = (
             tf.constant(states),
             tf.constant(actions),
             tf.constant(rewards, dtype=tf.float32),
             tf.constant(next_states),
             tf.constant(continue_mask, dtype=tf.float32),
         )
-        return states, actions, rewards, next_states, continue_mask
+        return states, actions, retruns, next_states, continue_mask
 
     @tf.function
     def greedy_policy(self, state):
@@ -72,7 +87,7 @@ class Agent:
     def compute_loss(self, state, reward, action, next_state, continue_mask):
         next_state_value = tf.reduce_max(self.tg_net(next_state), axis=-1)
 
-        q_value_target = reward + self.gamma * continue_mask * next_state_value
+        q_value_target = reward + self.gamma ** self.n_steps * continue_mask * next_state_value
         mask = tf.one_hot(action, self.action_space)
         with tf.GradientTape() as tape:
             q_value = self.net(state)

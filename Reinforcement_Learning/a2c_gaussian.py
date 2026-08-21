@@ -103,9 +103,10 @@ class Agent:
             actions = tf.random.normal(
                 tf.shape(mu), mean=mu, stddev=std, dtype=tf.float32
             )
-            log_probability = -(tf.math.pow(actions - mu, 2) / (
-                2 *std**2 + 1e-5
-            ) + 0.5 * tf.math.log(2 * np.pi * (std + 1e-5) ** 2))
+            log_probability = -(
+                tf.math.pow(actions - mu, 2) / (2 * std**2 + 1e-5)
+                + 0.5 * tf.math.log(2 * np.pi * (std + 1e-5) ** 2)
+            )
             actions = tf.clip_by_value(actions, clip_value_min=-0.4, clip_value_max=0.4)
             obs, reward, done = tf.numpy_function(
                 self.env_step,
@@ -139,7 +140,7 @@ class Agent:
     def compute_boostrapped_returns(
         self, next_obs: tf.Tensor, rewards: tf.Tensor, dones: tf.Tensor
     ) -> tf.Tensor:
-        _, _, next_state_value = tf.stop_gradient(self.model(next_obs))
+        _, _, next_state_value = self.model(next_obs)
         boostrapped_value = next_state_value[:, 0]
         boostrapped_shape = boostrapped_value.shape
 
@@ -166,7 +167,9 @@ class Agent:
         advantage = (advantage - tf.reduce_mean(advantage)) / (
             tf.math.reduce_std(advantage) + 1e-8
         )
-        policy_loss = tf.reduce_mean(advantage * tf.reduce_sum(log_probability, axis=-1, keepdims=True))
+        policy_loss = tf.reduce_mean(
+            advantage * tf.reduce_sum(log_probability, axis=-1, keepdims=True)
+        )
         value_loss = self.loss_fn(state_value, reward)
         entropy_loss = self.beta * tf.reduce_mean(
             0.5 * tf.math.log(2 * np.pi * np.e * action_deviation**2)
@@ -179,12 +182,21 @@ class Agent:
         )
 
     @tf.function(input_signature=[tf.TensorSpec(shape=(None, 348), dtype=tf.float64)])
-    def train_step(self, obs: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
+    def train_step(
+        self, obs: tf.Tensor
+    ) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
         with tf.GradientTape() as tape:
-            log_probabilities, state_values, rewards, dones, actions_deviation, next_obs = (
-                self.collect_data(obs)
+            (
+                log_probabilities,
+                state_values,
+                rewards,
+                dones,
+                actions_deviation,
+                next_obs,
+            ) = self.collect_data(obs)
+            returns = tf.stop_gradient(
+                self.compute_boostrapped_returns(next_obs, rewards, dones)
             )
-            returns = self.compute_boostrapped_returns(next_obs, rewards, dones)
             loss, policy_loss, value_loss, entropy_loss = self.compute_loss(
                 log_probabilities, state_values, returns, actions_deviation
             )
@@ -197,12 +209,14 @@ class Agent:
             policy_loss,
             value_loss,
             entropy_loss,
-            next_obs
+            next_obs,
         )
 
     def learn(self):
         self.obs, _ = self.env.reset() if self.obs is None else (self.obs, None)
-        rewards, loss, policy_loss, value_loss, entropy_loss, next_obs =  self.train_step(self.obs)
+        rewards, loss, policy_loss, value_loss, entropy_loss, next_obs = (
+            self.train_step(self.obs)
+        )
         self.obs = next_obs.numpy()
         return rewards, loss, policy_loss, value_loss, entropy_loss
 
