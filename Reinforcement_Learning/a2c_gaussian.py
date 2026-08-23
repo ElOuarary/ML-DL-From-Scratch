@@ -293,7 +293,8 @@ def main():
 
         moving_average_reward: deque = deque(maxlen=500)
         t = tqdm.trange(TRAIN_ITERATION)
-        for iteration in t:
+        
+        for iteration in range(TRAIN_ITERATION):
             start = perf_counter()
             train_reward, loss, policy_loss, value_loss, entropy_loss = agent.learn()
             end = perf_counter() - start
@@ -310,7 +311,7 @@ def main():
                 metrics.log(iteration, end)
 
                 with train_file_writer.as_default():
-                    tf.summary.scalar("train reward", running_reward, step=iteration)
+                    tf.summary.scalar("train reward", train_reward, step=iteration)
                     tf.summary.scalar("loss", loss, step=iteration)
                     tf.summary.scalar("policy loss", policy_loss, step=iteration)
                     tf.summary.scalar("value loss", value_loss, step=iteration)

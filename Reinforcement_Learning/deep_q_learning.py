@@ -11,15 +11,57 @@ Step = namedtuple(
     "Step", field_names=("state", "action", "reward", "next_state", "continue_mask")
 )
 
+class NoiseDense(keras.Layer):
+    def __init__(self, units, activation=None, **kwargs):
+        super(NoiseDense, self).__init__(**kwargs)
+        self.units = units
+        self.activation = keras.activations.get(activation)
+
+    def build(self, input_shape):
+        input_dim = input_shape[-1]
+
+        self.mu_w = self.add_weight(
+            shape=(input_dim, self.units),
+            initializer=keras.initializers.RandomUniform(-1/np.sqrt(input_dim), 1/np.sqrt(input_dim)),
+            name="mu_w",
+        )
+        self.sigma_w = self.add_weight(
+            shape=(input_dim, self.units),
+            initializer=keras.initializers.Constant(0.017),
+            name="sigma_w"
+        )
+
+        self.mu_b = self.add_weight(
+            shape=(self.units,),
+            initializer=keras.initializers.RandomUniform(-1/np.sqrt(input_dim), 1/np.sqrt(input_dim)),
+            name="mu_b"
+        )
+        self.sigma_b = self.add_weight(
+            shape=(self.units,),
+            initializer=keras.initializers.Constant(0.017),
+            name="sigma_b"
+        )
+        
+    def call(self, inputs):
+        epsilon_w = tf.random.normal(shape=(tf.shape(inputs)[-1], self.units))
+        epsilon_b = tf.random.normal(shape=(self.units,))
+        weights = self.mu_w + self.sigma_w * epsilon_w
+        bias = self.mu_b + self.sigma_b * epsilon_b
+
+        output = tf.matmul(inputs, weights) + bias
+        if self.activation is not None:
+            output = self.activation(output)
+
+        return output
+        
 
 class Agent:
     def __init__(
-        self, env, epsilon, gamma, net, tg_net, loss_fn, optimizer, n_steps,buffer_size
+        self, env, gamma, net, tg_net, loss_fn, optimizer, n_steps,buffer_size
     ):
         self.env = env
         self.state, _ = self.env.reset()
         self.action_space = env.action_space.n
-        self.epsilon = epsilon
         self.gamma = gamma
         self.net = net
         self.tg_net = tg_net
@@ -29,11 +71,8 @@ class Agent:
         self.replay_buffer = deque(maxlen=buffer_size)
 
     def explore(self):
-        if np.random.sample() < self.epsilon:
-            action = self.env.action_space.sample()
-        else:
-            action = self.greedy_policy(self.state)
-            action = action.numpy()[0]
+        action = self.greedy_policy(self.state)
+        action = action.numpy()[0]
         next_state, reward, terminated, truncated, _ = self.env.step(action)
         self.replay_buffer.append(
             Step(
@@ -91,7 +130,8 @@ class Agent:
 
     @tf.function
     def compute_loss(self, state, reward, action, next_state, continue_mask):
-        next_state_value = tf.reduce_max(self.tg_net(next_state), axis=-1)
+        next_state_optimal_action = tf.argmax(self.net(next_state), axis=-1)
+        next_state_value = tf.gather(self.tg_net(next_state), next_state_optimal_action, batch_dims=1)
 
         q_value_target = reward + self.gamma ** self.n_steps * continue_mask * next_state_value
         mask = tf.one_hot(action, self.action_space)
@@ -156,8 +196,8 @@ def main():
     model = keras.Sequential(
         [
             keras.layers.InputLayer(env.observation_space.shape),
-            keras.layers.Dense(256, activation="relu"),
-            keras.layers.Dense(256, activation="relu"),
+            NoiseDense(256, activation="relu"),
+            NoiseDense(256, activation="relu"),
             keras.layers.Dense(4),
         ]
     )
@@ -166,7 +206,7 @@ def main():
 
     loss_fn = keras.losses.Huber()
     optimizer = keras.optimizers.Nadam(learning_rate=alpha, clipnorm=1)
-    agent = Agent(env, 1, gamma, model, tg_model, loss_fn, optimizer, 4, buffer_size) # Pass the n-steps argument from the command line
+    agent = Agent(env, gamma, model, tg_model, loss_fn, optimizer, 4, buffer_size) # Pass the n-steps argument from the command line
 
     current_time = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     train_logs_dir = "logs/dqn/LunarLander/train/" + current_time
@@ -178,7 +218,6 @@ def main():
     try:
         for i in range(1, train_iteration + 1):
             agent.explore()
-            agent.epsilon = max(1 - i / 50_000, 0.01)
 
             if len(agent.replay_buffer) >= WARMUP:
                 loss, gradients = agent.train_model(batch_size)
