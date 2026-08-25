@@ -6,6 +6,7 @@ import gymnasium as gym
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
+import keras
 
 Step = namedtuple(
     "Step", field_names=("state", "action", "reward", "next_state", "continue_mask")
@@ -53,6 +54,34 @@ class NoiseDense(keras.Layer):
             output = self.activation(output)
 
         return output
+
+@keras.saving.register_keras_serializable(package="DQN", name="DuelingDQN")
+class DuelingDQN(keras.Model):
+        def __init__(self, observation_space, action_space, **kwargs):
+            super().__init__(**kwargs)
+            self.observation_space = observation_space
+            self.action_space = action_space
+            self.shared_network = keras.Sequential([
+                keras.layers.InputLayer(self.observation_space),
+                NoiseDense(256, activation="relu"),
+                NoiseDense(256, activation="relu"),
+            ])
+            self.state_val_head = keras.layers.Dense(1)
+            self.action_adv_head = keras.layers.Dense(self.action_space)
+
+        def call(self, input):
+            x = self.shared_network(input)
+            state_value = self.state_val_head(x)
+            action_advantage = self.action_adv_head(x)
+            return state_value + action_advantage - tf.reduce_mean(action_advantage, axis=-1, keepdims=True)
+
+        def get_config(self):
+            config = super().get_config()
+            config.update({
+                "observation_space": self.observation_space,
+                "action_space": self.action_space
+            })
+            return config
 
 class PrioritezReplayBuffer:
     def __init__(self, buff_size, proba_alpha, beta_start, beta_frames):
@@ -252,14 +281,10 @@ def main():
 
     env = gym.make("LunarLander-v3")
     test_env = gym.make_vec("LunarLander-v3", num_envs=20)
-    model = keras.Sequential(
-        [
-            keras.layers.InputLayer(env.observation_space.shape),
-            NoiseDense(256, activation="relu"),
-            NoiseDense(256, activation="relu"),
-            keras.layers.Dense(4),
-        ]
-    )
+
+    model = DuelingDQN(env.observation_space.shape, 4)
+    model(env.observation_space.sample()[np.newaxis])
+
     tg_model = keras.models.clone_model(model)
     tg_model.set_weights(model.get_weights())
 
