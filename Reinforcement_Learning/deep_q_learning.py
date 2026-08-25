@@ -53,11 +53,57 @@ class NoiseDense(keras.Layer):
             output = self.activation(output)
 
         return output
-        
+
+class PrioritezReplayBuffer:
+    def __init__(self, exp_source, buff_size, proba_alpha, beta_start, beta_frames):
+        self.exp_source = iter(exp_source)
+        self.proba_alpha = proba_alpha
+        self.capacity = buff_size
+        self.pos = 0
+        self.buffer = []
+        self.priorities = np.zeros((buff_size, ), dtype=np.float32)
+        self.beta = beta_start
+        self.beta_start = beta_start
+        self.beta_frames = beta_frames
+
+    def update_beta(self, idx):
+        v = self.beta_start + idx (1 - self.beta_start) / self.beta_frames
+        self.beta = min(1, v)
+
+    def __len__(self):
+        return len(self.buffer)
+
+    def populate(self, count):
+        max_prio = self.priorities.max() if self.buffer else 1.0
+        for _ in range(count):
+            sample = next(self.exp_source)
+            if len(self.buffer) < self.capacity:
+                self.buffer.append(sample)
+            else:
+                self.buffer[self.pos] = sample
+            self.priorities[self.pos] = max_prio
+            self.pos = (self.pos + 1) % self.capacity
+
+    def sample(self, batch_size):
+        if len(self.buffer) == self.capacity:
+            prios = self.priorities
+        else:
+            prios = self.priorities[:self.pos]
+
+        probas = prios**self.proba_alpha / prios.sum()
+        indices = np.random.choice(len(self.buffer, batch_size ,p=probas))
+        samples = [self.buffer[idx] for idx in indices]
+        weights = (len(self.buffer) * probas[indices]) ** (-self.beta)
+        weights /= weights.max()
+        return samples, indices, np.array(weights, dtype=np.float32)
+
+    def update_priorities(self, batch_indices, batch_priorities):
+        for idx, prio in zip(batch_indices, batch_priorities):
+            self.priorities[idx] = prio
 
 class Agent:
     def __init__(
-        self, env, gamma, net, tg_net, loss_fn, optimizer, n_steps,buffer_size
+        self, env, gamma, net, tg_net, optimizer, n_steps, buffer
     ):
         self.env = env
         self.state, _ = self.env.reset()
@@ -65,10 +111,9 @@ class Agent:
         self.gamma = gamma
         self.net = net
         self.tg_net = tg_net
-        self.loss_fn = loss_fn
         self.optimizer = optimizer
         self.n_steps = n_steps
-        self.replay_buffer = deque(maxlen=buffer_size)
+        self.replay_buffer = buffer
 
     def explore(self):
         action = self.greedy_policy(self.state)
@@ -129,7 +174,7 @@ class Agent:
         return tf.argmax(self.net(state[np.newaxis]), axis=-1)
 
     @tf.function
-    def compute_loss(self, state, reward, action, next_state, continue_mask):
+    def compute_loss(self, state, reward, action, next_state, continue_mask, batch_weights):
         next_state_optimal_action = tf.argmax(self.net(next_state), axis=-1)
         next_state_value = tf.gather(self.tg_net(next_state), next_state_optimal_action, batch_dims=1)
 
@@ -138,10 +183,12 @@ class Agent:
         with tf.GradientTape() as tape:
             q_value = self.net(state)
             q_value_masked = tf.reduce_sum(mask * q_value, axis=-1)
-            loss = self.loss_fn(q_value_target, q_value_masked)
-        gradients = tape.gradient(loss, self.net.trainable_variables)
+            loss = (q_value_target - q_value_masked) ** 2
+            weighted_loss = batch_weights * loss
+            mean_loss = tf.reduce_mean(weighted_loss)
+        gradients = tape.gradient(mean_loss, self.net.trainable_variables)
         self.optimizer.apply_gradients(zip(gradients, self.net.trainable_variables))
-        return loss, gradients
+        return mean_loss, gradients, mean_loss + 1e-5
 
     @tf.function
     def compute_batch(self, states):
@@ -151,7 +198,8 @@ class Agent:
         states, actions, rewards, next_states, continue_mask = self.sample_batch(
             batch_size
         )
-        loss = self.compute_loss(states, rewards, actions, next_states, continue_mask)
+        # batch weight need to be added
+        loss, gradient, batch_loss = self.compute_loss(states, rewards, actions, next_states, continue_mask)
         return loss
 
     def test(self, test_env):
@@ -179,6 +227,11 @@ def main():
     parser.add_argument("--network-update", type=int, default=1000)
     parser.add_argument("--reward-target", type=int, default=200)
     parser.add_argument("--train-iteration", type=int, default=100_000)
+    parser.add_argument("--n-steps", type=int, default=4)
+    parser.add_argument("--proba-alpha", type=float, default=0.4)
+    parser.add_argument("--beta-start", type=float, default=0.4)
+    parser.add_argument("--beta-steps", type=int, default=10_000)
+
     args = parser.parse_args()
     alpha = args.alpha
     batch_size = args.batch_size
@@ -190,6 +243,13 @@ def main():
     update_steps = args.network_update
     reward_target = args.reward_target
     train_iteration = args.train_iteration
+    n_steps = args.n_steps
+    proba_alpha = args.proba_alpha
+    beta_start = args.beta_start
+    beta_steps = args.bet_steps
+
+    # How to link the experience gathering with this object
+    buffer = PrioritezReplayBuffer(buffer_size, proba_alpha, beta_start, beta_steps)
 
     env = gym.make("LunarLander-v3")
     test_env = gym.make_vec("LunarLander-v3", num_envs=20)
@@ -204,9 +264,8 @@ def main():
     tg_model = keras.models.clone_model(model)
     tg_model.set_weights(model.get_weights())
 
-    loss_fn = keras.losses.Huber()
     optimizer = keras.optimizers.Nadam(learning_rate=alpha, clipnorm=1)
-    agent = Agent(env, gamma, model, tg_model, loss_fn, optimizer, 4, buffer_size) # Pass the n-steps argument from the command line
+    agent = Agent(env, gamma, model, tg_model, optimizer, n_steps, buffer)
 
     current_time = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     train_logs_dir = "logs/dqn/LunarLander/train/" + current_time
@@ -251,7 +310,7 @@ def main():
             frame = demo_env.render()
             frames.append(frame)
             action = tf.argmax(model(obs[np.newaxis]), axis=-1).numpy()[0]
-            obs, reward, terminated, truncated, _ = demo_env.step(action)
+            obs, _, terminated, truncated, _ = demo_env.step(action)
             if terminated or truncated:
                 break
 
