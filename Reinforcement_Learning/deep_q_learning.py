@@ -87,7 +87,8 @@ class PrioritezReplayBuffer:
         else:
             prios = self.priorities[:self.pos]
 
-        probas = prios**self.proba_alpha / prios.sum()
+        probas = prios**self.proba_alpha
+        probas /= np.sum(probas)
         indices = np.random.choice(len(self.buffer), batch_size ,p=probas)
         samples = [self.buffer[idx] for idx in indices]
         weights = (len(self.buffer) * probas[indices]) ** (-self.beta)
@@ -265,12 +266,12 @@ def main():
     optimizer = keras.optimizers.Nadam(learning_rate=alpha, clipnorm=1)
     agent = Agent(env, gamma, model, tg_model, optimizer, n_steps, buffer)
 
-    # current_time = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    # train_logs_dir = "logs/dqn/LunarLander/train/" + current_time
-    # test_logs_dir = "logs/dqn/LunarLander/test/" + current_time
+    current_time = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    train_logs_dir = "logs/dqn/LunarLander/train/" + current_time
+    test_logs_dir = "logs/dqn/LunarLander/test/" + current_time
 
-    # train_summary_writer = tf.summary.create_file_writer(train_logs_dir)
-    # test_summary_writer = tf.summary.create_file_writer(test_logs_dir)
+    train_summary_writer = tf.summary.create_file_writer(train_logs_dir)
+    test_summary_writer = tf.summary.create_file_writer(test_logs_dir)
 
     try:
         for i in range(1, train_iteration + 1):
@@ -283,12 +284,12 @@ def main():
                     gradient_mean = tf.reduce_mean(tf.concat([tf.reshape(g, [-1]) for g in gradients], axis=0))
                     mean_reward = agent.test(test_env)
 
-                    # with train_summary_writer.as_default():
-                    #     tf.summary.scalar("train_loss", loss, step=i)
-                    #     tf.summary.scalar("gradient_mean", gradient_mean, step=i)
+                    with train_summary_writer.as_default():
+                        tf.summary.scalar("train_loss", loss, step=i)
+                        tf.summary.scalar("gradient_mean", gradient_mean, step=i)
 
-                    # with test_summary_writer.as_default():
-                    #     tf.summary.scalar("test_mean_reward", mean_reward, step=i)
+                    with test_summary_writer.as_default():
+                        tf.summary.scalar("test_mean_reward", mean_reward, step=i)
 
                     if mean_reward > reward_target:
                         print("Problem Solved")
@@ -320,8 +321,8 @@ def main():
         env.close()
         test_env.close()
         demo_env.close()
-        # test_summary_writer.close()
-        # train_summary_writer.close()
+        test_summary_writer.close()
+        train_summary_writer.close()
 
 
 if __name__ == "__main__":
