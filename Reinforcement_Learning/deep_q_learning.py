@@ -57,29 +57,44 @@ class NoiseDense(keras.Layer):
 
 @keras.saving.register_keras_serializable(package="DQN", name="DuelingDQN")
 class DuelingDQN(keras.Model):
-        def __init__(self, observation_space, action_space, **kwargs):
+        def __init__(self, observation_space, action_space, n_atoms,**kwargs):
             super().__init__(**kwargs)
             self.observation_space = observation_space
             self.action_space = action_space
+            self.n_atoms = n_atoms
             self.shared_network = keras.Sequential([
                 keras.layers.InputLayer(self.observation_space),
                 NoiseDense(256, activation="relu"),
                 NoiseDense(256, activation="relu"),
             ])
             self.state_val_head = keras.layers.Dense(1)
-            self.action_adv_head = keras.layers.Dense(self.action_space)
+            self.action_adv_head = keras.layers.Dense(self.action_space * self.n_atoms)
 
+            self.softmax = keras.activations.softmax
+
+        # Still not working more complicated that I tought I need to reread and understand the method more
         def call(self, input):
             x = self.shared_network(input)
             state_value = self.state_val_head(x)
             action_advantage = self.action_adv_head(x)
             return state_value + action_advantage - tf.reduce_mean(action_advantage, axis=-1, keepdims=True)
 
+        def both(self, x):
+            cat_out = self(x)
+            probs = self.softmax(cat_out)
+            weights = probs * self.supports
+            res = tf.reduce_sum(weights, axis=2)
+            return cat_out, res
+
+        def qvals(self, x):
+            return self.both(x)[1]
+
         def get_config(self):
             config = super().get_config()
             config.update({
                 "observation_space": self.observation_space,
-                "action_space": self.action_space
+                "action_space": self.action_space,
+                "n_atoms": self.n_atoms
             })
             return config
 
@@ -197,6 +212,48 @@ class Agent:
         )
         return states, actions, retruns, next_states, continue_mask, weights, indices
 
+    def distr_projection(self, next_distr, rewards, dones):
+        # next_distr is expected to be the batch of distibutions with a shape (batch_size, N_atoms)
+        batch_size = len(rewards)
+        proj_distr = np.zeros((batch_size, 51), dtype=np.float32) # variable to store the result of projection 
+        delta_z = (100- (-100)) / 51 - 1 # (Vmax - Vmin) / (N_atoms - 1)
+
+        for atom in range(51): # for atom in range(N_atoms)
+            v = rewards + (-100 + atom * delta_z) * self.gamma # The projection of the atom by the Bellaman Operator
+            tz_j = np.min(100, np.max(-100, v)) # Bound the projection to the limit of Vmax and Vmin
+
+            b_j = (tz_j + 100) /  delta_z # Compute the atom number in which the value has been projected
+
+            l = np.floor(b_j).astype(np.int32)
+            u = np.ceil(b_j).astype(np.int32)
+            eq_mask = u == l # When the projection of the atom lands exactly on the target atom where b_j is an integer
+            proj_distr[eq_mask, l[eq_mask]] += next_distr[eq_mask, atom]
+
+            ne_mask = u != l
+            proj_distr[ne_mask, l[ne_mask]] += next_distr[ne_mask, atom] * (u - b_j)[ne_mask]
+            proj_distr[ne_mask, u[ne_mask]] += next_distr[ne_mask, atom] * (b_j - l)[ne_mask]
+
+            if dones.any():
+                proj_distr[dones] = 0.0
+                tz_j = np.min(100, np.max(-100, rewards[dones]))
+                b_j = (tz_j + 100) / delta_z
+                l = np.floor(b_j).astype(np.int32)
+                u = np.ceil(b_j).astype(np.int32)
+                eq_mask = u == l
+                eq_dones = dones.copy()
+                eq_dones[dones] = eq_mask
+                if eq_dones.any():
+                    proj_distr[eq_dones, l[eq_mask]] = 1.0
+                ne_mask = u != l
+                ne_dones = dones.copy()
+                ne_dones[dones] = ne_mask
+                if ne_dones.any():
+                    proj_distr[ne_dones, l[ne_mask]] = (u - b_j)[ne_mask]
+                    proj_distr[ne_dones, u[ne_mask]] = (b_j - l)[ne_mask]
+
+            return proj_distr
+                    
+
     @tf.function
     def greedy_policy(self, state):
         return tf.argmax(self.net(state[np.newaxis]), axis=-1)
@@ -259,6 +316,9 @@ def main():
     parser.add_argument("--proba-alpha", type=float, default=0.6)
     parser.add_argument("--beta-start", type=float, default=0.4)
     parser.add_argument("--beta-steps", type=int, default=10_000)
+    parser.add_argument("--v-max", type=int, default=100)
+    parser.add_argument("--v-min", type=int, default=-100)
+    parser.add_argument("--n-atoms", type=int, default=51)
 
     args = parser.parse_args()
     alpha = args.alpha
@@ -275,6 +335,10 @@ def main():
     proba_alpha = args.proba_alpha
     beta_start = args.beta_start
     beta_steps = args.beta_steps
+    V_MAX = args.v_max
+    V_MIN = args.v_min
+    N_ATOMS = args.n_atoms
+    DELTA_Z = (V_MAX - V_MIN) / (N_ATOMS - 1)
 
     # How to link the experience gathering with this object
     buffer = PrioritezReplayBuffer(buffer_size, proba_alpha, beta_start, beta_steps)
