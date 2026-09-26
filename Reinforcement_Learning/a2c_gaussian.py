@@ -270,7 +270,7 @@ def main():
         if Path("a2c_guassian.weights.h5").exists():
             model.load_weights("a2c_guassian.weights.h5")
 
-        value_loss_fn = keras.losses.MeanSquaredError()
+        value_loss_fn = keras.losses.Huber()
         optimizer = keras.optimizers.Adam(learning_rate=ALPHA, clipnorm=0.1)
 
         agent = Agent(
