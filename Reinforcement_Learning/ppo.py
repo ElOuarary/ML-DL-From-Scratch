@@ -86,6 +86,52 @@ def save_mujoco_demo(
         pass
 
 
+def configure_hardware(device="auto", mixed_precision="auto", threads=0):
+    import os as _os
+
+    if threads and threads > 0:
+        n_threads = int(threads)
+    else:
+        n_threads = _os.cpu_count() or 8
+    try:
+        tf.config.threading.set_inter_op_parallelism_threads(n_threads)
+        tf.config.threading.set_intra_op_parallelism_threads(n_threads)
+    except RuntimeError:
+        pass  # must be set before any TF runtime init
+
+    gpus = tf.config.list_physical_devices("GPU")
+    want_gpu = device in ("auto", "gpu")
+    gpu_available = bool(gpus) and want_gpu
+    if device == "gpu" and not gpus:
+        print("WARNING: --device=gpu requested but no GPU found, using CPU")
+    if gpu_available:
+        try:
+            for g in gpus:
+                tf.config.experimental.set_memory_growth(g, True)
+        except Exception as e:  # pragma: no cover
+            print(f"Could not set GPU memory growth: {e}")
+    use_mp = (
+        (mixed_precision == "on")
+        or (mixed_precision == "auto" and gpu_available)
+    )
+    if use_mp:
+        try:
+            from keras import mixed_precision as _mp
+
+            _mp.set_global_policy("mixed_float16")
+            print("Mixed precision enabled (mixed_float16)")
+        except Exception as e:  # pragma: no cover
+            print(f"Could not enable mixed precision: {e}")
+            use_mp = False
+
+    if gpu_available:
+        device_str = f"GPU ({len(gpus)}x {[g.name for g in gpus]})"
+    else:
+        device_str = f"CPU ({n_threads} threads)"
+    print(f"Hardware: {device_str} | mixed_precision={use_mp}")
+    return device_str, gpu_available
+
+
 def build_arg_parser():
     arg_parser = argparse.ArgumentParser()
     arg_parser.add_argument("--env-id", default="CartPole-v1", type=str)
@@ -107,6 +153,22 @@ def build_arg_parser():
     arg_parser.add_argument("--reward-threshold", default=475.0, type=float)
     arg_parser.add_argument("--test-max-steps", default=500, type=int)
     arg_parser.add_argument("--seed", default=0, type=int)
+    arg_parser.add_argument(
+        "--device", default="auto", choices=["auto", "gpu", "cpu"], type=str,
+        help="auto uses NVIDIA GPU if TF detects one, else CPU",
+    )
+    arg_parser.add_argument(
+        "--mixed-precision", default="auto", choices=["auto", "on", "off"],
+        type=str, help="auto enables float16 only when a GPU is present",
+    )
+    arg_parser.add_argument(
+        "--xla", action="store_true",
+        help="compile train steps with XLA (helps GPU, usually neutral on CPU)",
+    )
+    arg_parser.add_argument(
+        "--threads", default=0, type=int,
+        help="TF inter/intra threads (0 = cpu_count, for CPU env stepping)",
+    )
     return arg_parser
 
 
@@ -168,6 +230,12 @@ class GaussianActorCritic(tf.keras.Model):
             action_scale if action_scale is not None else [1.0] * action_dim
         )
         self.log_std_init = log_std_init
+        self.action_mean_tf = tf.constant(
+            self.action_mean_list, dtype=tf.float32
+        )
+        self.action_scale_tf = tf.constant(
+            self.action_scale_list, dtype=tf.float32
+        )
         self.shared_network = tf.keras.models.Sequential(
             [
                 tf.keras.layers.InputLayer(shape=self.observation_space),
@@ -197,15 +265,9 @@ class GaussianActorCritic(tf.keras.Model):
     ) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
         x = self.shared_network(obs)
         mu_raw = self.mu_head(x)
-        action_mean = tf.convert_to_tensor(
-            self.action_mean_list, dtype=tf.float32
-        )
-        action_scale = tf.convert_to_tensor(
-            self.action_scale_list, dtype=tf.float32
-        )
-        mu = action_mean + action_scale * mu_raw
+        mu = self.action_mean_tf + self.action_scale_tf * mu_raw
         clipped_log_std = tf.clip_by_value(self.log_std, -20.0, 2.0)
-        std = tf.ones_like(mu) * tf.exp(clipped_log_std)
+        std = tf.exp(clipped_log_std)
         value = self.critic(x)
         return mu, std, value
 
@@ -258,6 +320,7 @@ class Agent:
         n_epochs,
         minibatch_size,
         test_max_steps,
+        xla=False,
     ):
         self.env = env
         self.test_env = test_env
@@ -273,6 +336,31 @@ class Agent:
         self.n_epochs = n_epochs
         self.minibatch_size = minibatch_size
         self.test_max_steps = test_max_steps
+        self.xla = bool(xla)
+        self.train_step_discrete = tf.function(
+            self._train_step_discrete_impl,
+            input_signature=[
+                tf.TensorSpec(shape=(None, None), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+            ],
+            jit_compile=self.xla,
+        )
+        self.train_step_continuous = tf.function(
+            self._train_step_continuous_impl,
+            input_signature=[
+                tf.TensorSpec(shape=(None, None), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, None), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+            ],
+            jit_compile=self.xla,
+        )
 
         self.num_envs = self.env.num_envs
         self.obs_dim = int(self.env.single_observation_space.shape[0])
@@ -299,13 +387,11 @@ class Agent:
             self.action_high_tf = None
         self.current_states, _ = self.env.reset()
 
-    @tf.function
+    @tf.function(input_signature=[tf.TensorSpec(shape=(None, None), dtype=tf.float32)])
     def predict(self, state):
         if self.is_continuous:
             mu, std, state_value = self.model(state)
             eps = tf.random.normal(tf.shape(mu))
-            # Store RAW (unclipped) actions for training so old/new log-probs
-            # are computed on the same action
             raw_actions = mu + std * eps
             log_prob = gaussian_log_prob(raw_actions, mu, std)
             return raw_actions, log_prob, tf.squeeze(state_value, axis=-1)
@@ -316,6 +402,14 @@ class Agent:
             log_softmax = tf.nn.log_softmax(action_logits)
             log_prob = tf.gather(log_softmax, action, batch_dims=1)
             return action, log_prob, tf.squeeze(state_value, axis=-1)
+
+    @tf.function(input_signature=[tf.TensorSpec(shape=(None, None), dtype=tf.float32)])
+    def predict_deterministic(self, state):
+        if self.is_continuous:
+            mu, _, _ = self.model(state, training=False)
+            return mu
+        action_logits, _ = self.model(state, training=False)
+        return tf.argmax(action_logits, axis=-1)
 
     def collect_rollout(self, states: np.ndarray):
         states = states.astype(np.float32)
@@ -413,18 +507,7 @@ class Agent:
             rollout_reward,
         )
 
-    @tf.function(
-        input_signature=[
-            tf.TensorSpec(shape=(None, None), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,), dtype=tf.int32),
-            tf.TensorSpec(shape=(None,), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,), dtype=tf.float32),
-        ],
-        jit_compile=True,
-    )
-    def train_step_discrete(
+    def _train_step_discrete_impl(
         self,
         states: tf.Tensor,
         actions: tf.Tensor,
@@ -475,17 +558,7 @@ class Agent:
         self.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
         return loss, policy_loss, value_loss, entropy, approx_kl, clipfrac
 
-    @tf.function(
-        input_signature=[
-            tf.TensorSpec(shape=(None, None), dtype=tf.float32),
-            tf.TensorSpec(shape=(None, None), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,), dtype=tf.float32),
-        ],
-    )
-    def train_step_continuous(
+    def _train_step_continuous_impl(
         self,
         states: tf.Tensor,
         actions: tf.Tensor,
@@ -539,6 +612,7 @@ class Agent:
             if self.current_states is None
             else (self.current_states, None)
         )
+        t_roll = perf_counter()
         (
             states,
             actions,
@@ -548,12 +622,12 @@ class Agent:
             old_values,
             rollout_reward,
         ) = self.collect_rollout(current_states)
+        rollout_time = perf_counter() - t_roll
 
-        adv_np = advantages.numpy()
-        adv_np = (adv_np - adv_np.mean()) / (adv_np.std() + 1e-8)
-        advantages = tf.convert_to_tensor(adv_np, dtype=tf.float32)
+        adv_mean, adv_var = tf.nn.moments(advantages, axes=[0])
+        advantages = (advantages - adv_mean) / tf.sqrt(adv_var + 1e-8)
 
-        n_total = int(states.shape[0])
+        t_train = perf_counter()
         loss, policy_loss, value_loss, entropy, approx_kl, clipfrac = (
             tf.constant(0.0),
             tf.constant(0.0),
@@ -568,17 +642,24 @@ class Agent:
             if self.is_continuous
             else self.train_step_discrete
         )
+        dataset = tf.data.Dataset.from_tensor_slices(
+            (states, actions, old_logprobs, advantages, returns, old_values)
+        )
         for _ in range(self.n_epochs):
-            indices = np.arange(n_total)
-            np.random.shuffle(indices)
-            for start_idx in range(0, n_total, self.minibatch_size):
-                mb_idx = indices[start_idx : start_idx + self.minibatch_size]
-                mb_states = tf.gather(states, mb_idx)
-                mb_actions = tf.gather(actions, mb_idx)
-                mb_old_logprobs = tf.gather(old_logprobs, mb_idx)
-                mb_advantages = tf.gather(advantages, mb_idx)
-                mb_returns = tf.gather(returns, mb_idx)
-                mb_old_values = tf.gather(old_values, mb_idx)
+            ds = (
+                dataset.shuffle(buffer_size=int(states.shape[0]))
+                .batch(self.minibatch_size, drop_remainder=False)
+                .prefetch(tf.data.AUTOTUNE)
+            )
+            for mb in ds:
+                (
+                    mb_states,
+                    mb_actions,
+                    mb_old_logprobs,
+                    mb_advantages,
+                    mb_returns,
+                    mb_old_values,
+                ) = mb
                 (
                     l,
                     pl,
@@ -603,7 +684,10 @@ class Agent:
                 n_updates += 1
 
         n_updates = max(n_updates, 1)
+        train_time = perf_counter() - t_train
         end = perf_counter()
+        self.last_rollout_time = rollout_time
+        self.last_train_time = train_time
         return (
             rollout_reward,
             loss / n_updates,
@@ -650,15 +734,14 @@ class Agent:
         for _ in range(self.test_max_steps):
             if not np.any(active):
                 break
-            s = states.astype(np.float32)
+            s = tf.convert_to_tensor(states.astype(np.float32))
+            det = self.predict_deterministic(s).numpy()
             if self.is_continuous:
-                mu, _, _ = self.model(s, training=False)
                 actions = np.clip(
-                    mu.numpy(), self.action_low, self.action_high
+                    det, self.action_low, self.action_high
                 ).astype(np.float32)
             else:
-                action_logits, _ = self.model(s, training=False)
-                actions = tf.argmax(action_logits, axis=-1).numpy()
+                actions = det
             states, rewards, terminated, truncated, _ = self.test_env.step(actions)
             states = states.astype(np.float32)
             done = np.logical_or(terminated, truncated)
@@ -690,6 +773,12 @@ def main():
     REWARD_THRESHOLD = args.reward_threshold
     TEST_MAX_STEPS = args.test_max_steps
     SEED = args.seed
+
+    device_str, gpu_available = configure_hardware(
+        device=args.device,
+        mixed_precision=args.mixed_precision,
+        threads=args.threads,
+    )
 
     np.random.seed(SEED)
     tf.random.set_seed(SEED)
@@ -756,7 +845,9 @@ def main():
         EPOCHS,
         MINIBATCH_SIZE,
         TEST_MAX_STEPS,
+        xla=args.xla,
     )
+    print(f"Device: {device_str} | xla={args.xla} | env={ENV_ID}")
 
     current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
     train_logs_dir = f"logs/PPO/{safe_env}/train/" + current_time
@@ -805,6 +896,16 @@ def main():
                     tf.summary.scalar("approx kl", approx_kl, step=iteration)
                     tf.summary.scalar("clipfrac", clipfrac, step=iteration)
                     tf.summary.scalar("iteration_time", iteration_time, step=iteration)
+                    tf.summary.scalar(
+                        "rollout_time",
+                        getattr(agent, "last_rollout_time", 0.0),
+                        step=iteration,
+                    )
+                    tf.summary.scalar(
+                        "train_time",
+                        getattr(agent, "last_train_time", 0.0),
+                        step=iteration,
+                    )
 
                 with test_summary_writer.as_default():
                     tf.summary.scalar("test reward", test_reward, step=iteration)
@@ -813,7 +914,11 @@ def main():
                     f"iter {iteration}: rollout={rollout_reward:.1f} "
                     f"running={running_reward:.1f} test={test_reward:.1f} "
                     f"loss={float(loss):.4f} kl={float(approx_kl):.4f} "
-                    f"clipfrac={float(clipfrac):.3f}"
+                    f"clipfrac={float(clipfrac):.3f} "
+                    f"iter_t={iteration_time:.2f}s "
+                    f"(rollout={getattr(agent, 'last_rollout_time', 0):.2f}s "
+                    f"train={getattr(agent, 'last_train_time', 0):.2f}s) "
+                    f"[{device_str}]"
                 )
 
                 model.save_weights(weights_path)
