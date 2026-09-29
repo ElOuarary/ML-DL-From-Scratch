@@ -167,8 +167,13 @@ def build_arg_parser():
         help="auto uses NVIDIA GPU if TF detects one, else CPU",
     )
     arg_parser.add_argument(
-        "--mixed-precision", default="auto", choices=["auto", "on", "off"],
-        type=str, help="auto enables float16 only when a GPU is present",
+        "--mixed-precision", default="off", choices=["auto", "on", "off"],
+        type=str,
+        help="float16 trunk compute. Default off: this 2-layer MLP is "
+        "env-step bound, not matmul bound, and float16 trunk activations "
+        "can overflow (obs magnitudes x wide dot products -> inf -> NaN "
+        "advantages). Opt in with 'on' (guarded by loss scaling + "
+        "non-finite grad/batch checks). 'auto' = on iff GPU present.",
     )
     arg_parser.add_argument(
         "--xla", action="store_true",
@@ -537,6 +542,11 @@ class Agent:
         computed from a scaled loss and unscaled before the update --
         otherwise small grads underflow to zero. Plain-Adam path unchanged.
         Logged losses always use the unscaled `loss`.
+
+        Non-finite grads (overflow -> inf/NaN, e.g. from a blown-up batch)
+        are zeroed so one bad minibatch can never poison the weights;
+        returns 1.0 if every grad was finite else 0.0 so the caller can warn.
+        XLA-safe: no Python control flow, only elementwise ops.
         """
         variables = self.model.trainable_variables
         if self._loss_scaling:
@@ -546,7 +556,21 @@ class Agent:
             grads = self.optimizer.get_unscaled_gradients(grads)
         else:
             grads = tape.gradient(loss, variables)
-        self.optimizer.apply_gradients(zip(grads, variables))
+        finite_flags = []
+        clean_grads = []
+        for g in grads:
+            if g is None:
+                clean_grads.append(None)
+                continue
+            is_finite = tf.math.is_finite(g)
+            finite_flags.append(tf.reduce_all(is_finite))
+            clean_grads.append(tf.where(is_finite, g, tf.zeros_like(g)))
+        self.optimizer.apply_gradients(zip(clean_grads, variables))
+        if not finite_flags:
+            return tf.constant(1.0)
+        return tf.cast(
+            tf.reduce_all(tf.stack(finite_flags)), tf.float32
+        )
 
     def _train_step_discrete_impl(
         self,
@@ -595,8 +619,16 @@ class Agent:
                 tf.cast(tf.abs(ratio - 1.0) > self.clip_eps, tf.float32)
             )
 
-        self._compute_and_apply_grads(tape, loss)
-        return loss, policy_loss, value_loss, entropy, approx_kl, clipfrac
+        update_ok = self._compute_and_apply_grads(tape, loss)
+        return (
+            loss,
+            policy_loss,
+            value_loss,
+            entropy,
+            approx_kl,
+            clipfrac,
+            update_ok,
+        )
 
     def _train_step_continuous_impl(
         self,
@@ -641,8 +673,16 @@ class Agent:
                 tf.cast(tf.abs(ratio - 1.0) > self.clip_eps, tf.float32)
             )
 
-        self._compute_and_apply_grads(tape, loss)
-        return loss, policy_loss, value_loss, entropy, approx_kl, clipfrac
+        update_ok = self._compute_and_apply_grads(tape, loss)
+        return (
+            loss,
+            policy_loss,
+            value_loss,
+            entropy,
+            approx_kl,
+            clipfrac,
+            update_ok,
+        )
 
     def learn_from_episode(self):
         start = perf_counter()
@@ -663,6 +703,46 @@ class Agent:
         ) = self.collect_rollout(current_states)
         rollout_time = perf_counter() - t_roll
 
+        # Firewall: a blown-up batch (sim inf/NaN or overflowed values)
+        # must never reach the optimizer -- skip updates and reset the
+        # envs so the next rollout starts from a clean state. This runs
+        # eagerly (a few scalar reduces per iteration: negligible cost).
+        # Note: is_finite is float-only; discrete int32 actions cannot
+        # carry NaN/inf by construction, so check them only when floating.
+        actions_finite = (
+            tf.reduce_all(tf.math.is_finite(actions))
+            if actions.dtype.is_floating
+            else tf.constant(True)
+        )
+        batch_finite = bool(
+            tf.reduce_all(tf.math.is_finite(states))
+            and actions_finite
+            and tf.reduce_all(tf.math.is_finite(old_logprobs))
+            and tf.reduce_all(tf.math.is_finite(returns))
+            and tf.reduce_all(tf.math.is_finite(old_values))
+        )
+        if not batch_finite:
+            print(
+                "WARNING: non-finite rollout batch (obs/actions/returns "
+                "contain inf or NaN) -- skipping gradient updates and "
+                "resetting envs."
+            )
+            self.current_states, _ = self.env.reset()
+            end = perf_counter()
+            zero = tf.constant(0.0)
+            self.last_rollout_time = rollout_time
+            self.last_train_time = 0.0
+            return (
+                rollout_reward,
+                zero,
+                zero,
+                zero,
+                zero,
+                zero,
+                zero,
+                end - start,
+            )
+
         adv_mean, adv_var = tf.nn.moments(advantages, axes=[0])
         advantages = (advantages - adv_mean) / tf.sqrt(adv_var + 1e-8)
 
@@ -675,6 +755,7 @@ class Agent:
             tf.constant(0.0),
             tf.constant(0.0),
         )
+        finite_min = tf.constant(1.0)
         n_updates = 0
         train_step = (
             self.train_step_continuous
@@ -706,6 +787,7 @@ class Agent:
                     ent,
                     kl,
                     cf,
+                    ok,
                 ) = train_step(
                     mb_states,
                     mb_actions,
@@ -720,7 +802,17 @@ class Agent:
                 entropy += ent
                 approx_kl += kl
                 clipfrac += cf
+                finite_min = tf.minimum(finite_min, ok)
                 n_updates += 1
+
+        n_updates = max(n_updates, 1)
+        if float(finite_min) < 1.0:
+            print(
+                "WARNING: non-finite gradients were sanitized this "
+                "iteration (updates zeroed where needed) -- if this "
+                "repeats, the run is diverging: lower --alpha, check "
+                "reward scale, or disable --mixed-precision."
+            )
 
         n_updates = max(n_updates, 1)
         train_time = perf_counter() - t_train
