@@ -29,6 +29,7 @@ tabular_q_learning = "Reinforcement_Learning.tabular_q_learning:main"
 deep_q_learning = "Reinforcement_Learning.deep_q_learning:main"
 reinforce = "Reinforcement_Learning.reinforce:main"
 a2c = "Reinforcement_Learning.a2c:main"
+ppo = "Reinforcement_Learning.ppo:main"
 
 [tool.uv]
 package = true

@@ -133,25 +133,34 @@ def configure_hardware(device="auto", mixed_precision="auto", threads=0):
 
 
 def build_arg_parser():
+    # Defaults are tuned for HumanoidStandup-v5 (348-dim obs, 17-dim
+    # continuous actions, ~1k reward scale, 1000-step episodes), so the
+    # script runs with good values and NO flags -- e.g. on Google Colab:
+    #   !python Reinforcement_Learning/ppo.py
+    # or from a notebook cell:  main([])
+    # Any flag still overrides its default (local CLI usage unchanged).
     arg_parser = argparse.ArgumentParser()
-    arg_parser.add_argument("--env-id", default="CartPole-v1", type=str)
-    arg_parser.add_argument("--num-envs", default=8, type=int)
+    arg_parser.add_argument("--env-id", default="HumanoidStandup-v5", type=str)
+    arg_parser.add_argument("--num-envs", default=16, type=int)
     arg_parser.add_argument("--num-test-envs", default=10, type=int)
     arg_parser.add_argument("--gamma", default=0.99, type=float)
     arg_parser.add_argument("--gae-lambda", default=0.95, type=float)
     arg_parser.add_argument("--clip-eps", default=0.2, type=float)
     arg_parser.add_argument("--value-coef", default=0.5, type=float)
     arg_parser.add_argument("--entropy-beta", default=0.01, type=float)
-    arg_parser.add_argument("--alpha", default=0.00025, type=float)
-    arg_parser.add_argument("--num-steps", default=128, type=int)
-    arg_parser.add_argument("--epochs", default=4, type=int)
-    arg_parser.add_argument("--minibatch-size", default=256, type=int)
+    arg_parser.add_argument("--alpha", default=0.0003, type=float)
+    arg_parser.add_argument("--num-steps", default=512, type=int)
+    arg_parser.add_argument("--epochs", default=10, type=int)
+    arg_parser.add_argument("--minibatch-size", default=512, type=int)
     arg_parser.add_argument("--max-grad-norm", default=0.5, type=float)
     arg_parser.add_argument("--log-std-init", default=-0.5, type=float)
-    arg_parser.add_argument("--train-iteration", default=5_000, type=int)
-    arg_parser.add_argument("--log-interval", default=200, type=int)
-    arg_parser.add_argument("--reward-threshold", default=475.0, type=float)
-    arg_parser.add_argument("--test-max-steps", default=500, type=int)
+    arg_parser.add_argument("--train-iteration", default=2_500, type=int)
+    arg_parser.add_argument("--log-interval", default=500, type=int)
+    # Gymnasium defines no solved threshold for HumanoidStandup
+    # (spec.reward_threshold is None); 100000 effectively disables the
+    # "Problem Solved" early trigger while best-checkpointing still works.
+    arg_parser.add_argument("--reward-threshold", default=100000.0, type=float)
+    arg_parser.add_argument("--test-max-steps", default=1000, type=int)
     arg_parser.add_argument("--seed", default=0, type=int)
     arg_parser.add_argument(
         "--device", default="auto", choices=["auto", "gpu", "cpu"], type=str,
@@ -163,7 +172,8 @@ def build_arg_parser():
     )
     arg_parser.add_argument(
         "--xla", action="store_true",
-        help="compile train steps with XLA (helps GPU, usually neutral on CPU)",
+        help="compile train steps with XLA (auto-enabled when a GPU is "
+        "detected; on CPU-only machines it is ~neutral/slightly slower)",
     )
     arg_parser.add_argument(
         "--threads", default=0, type=int,
@@ -750,10 +760,12 @@ class Agent:
         return float(np.mean(total_reward)), []
 
 
-def main():
+def main(argv=None):
+    """Entry point. `argv` lets notebook/Colab cells call main([...]) or
+    main([]) for baked-in defaults without touching argparse / sys.argv."""
     metrics = MetricLog()
 
-    args = build_arg_parser().parse_args()
+    args = build_arg_parser().parse_args(argv)
     ENV_ID = args.env_id
     NUM_ENVS = args.num_envs
     NUM_TEST_ENVS = args.num_test_envs
@@ -830,6 +842,9 @@ def main():
         learning_rate=ALPHA, clipnorm=MAX_GRAD_NORM
     )
 
+    # XLA pays off on NVIDIA GPUs (e.g. Colab T4/L4/A100) and is roughly
+    # neutral on CPU, so auto-enable it whenever a GPU was detected.
+    use_xla = bool(args.xla or gpu_available)
     agent = Agent(
         envs,
         test_env,
@@ -845,9 +860,9 @@ def main():
         EPOCHS,
         MINIBATCH_SIZE,
         TEST_MAX_STEPS,
-        xla=args.xla,
+        xla=use_xla,
     )
-    print(f"Device: {device_str} | xla={args.xla} | env={ENV_ID}")
+    print(f"Device: {device_str} | xla={use_xla} | env={ENV_ID}")
 
     current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
     train_logs_dir = f"logs/PPO/{safe_env}/train/" + current_time
