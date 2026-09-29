@@ -129,7 +129,7 @@ def configure_hardware(device="auto", mixed_precision="auto", threads=0):
     else:
         device_str = f"CPU ({n_threads} threads)"
     print(f"Hardware: {device_str} | mixed_precision={use_mp}")
-    return device_str, gpu_available
+    return device_str, gpu_available, use_mp
 
 
 def build_arg_parser():
@@ -206,7 +206,12 @@ class ActorCritic(tf.keras.Model):
 
     def call(self, obs: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
         x = self.shared_network(obs)
-        return self.actor(x), self.critic(x)
+        # Cast to float32: under mixed_float16 the trunk computes in
+        # float16, but logits/values must stay float32 for
+        # categorical sampling, log_softmax and loss stability.
+        return tf.cast(self.actor(x), tf.float32), tf.cast(
+            self.critic(x), tf.float32
+        )
 
     def get_config(self):
         config = super().get_config()
@@ -274,11 +279,14 @@ class GaussianActorCritic(tf.keras.Model):
         self, obs: tf.Tensor
     ) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
         x = self.shared_network(obs)
-        mu_raw = self.mu_head(x)
+        # Head math in float32: under mixed_float16 mu_raw is float16 and
+        # would clash with the float32 action constants / log_std, and the
+        # Gaussian log-prob/entropy need float32 precision anyway.
+        mu_raw = tf.cast(self.mu_head(x), tf.float32)
         mu = self.action_mean_tf + self.action_scale_tf * mu_raw
         clipped_log_std = tf.clip_by_value(self.log_std, -20.0, 2.0)
-        std = tf.exp(clipped_log_std)
-        value = self.critic(x)
+        std = tf.exp(clipped_log_std)  # [D], broadcasts to [B, D]
+        value = tf.cast(self.critic(x), tf.float32)
         return mu, std, value
 
     def get_config(self):
@@ -347,6 +355,11 @@ class Agent:
         self.minibatch_size = minibatch_size
         self.test_max_steps = test_max_steps
         self.xla = bool(xla)
+        # Duck-typed: a LossScaleOptimizer wrapper (used with mixed_float16)
+        # needs scaled-loss / unscaled-gradients handling in train steps.
+        self._loss_scaling = hasattr(
+            optimizer, "scale_loss"
+        ) and hasattr(optimizer, "get_unscaled_gradients")
         self.train_step_discrete = tf.function(
             self._train_step_discrete_impl,
             input_signature=[
@@ -401,7 +414,7 @@ class Agent:
     def predict(self, state):
         if self.is_continuous:
             mu, std, state_value = self.model(state)
-            eps = tf.random.normal(tf.shape(mu))
+            eps = tf.random.normal(tf.shape(mu), dtype=mu.dtype)
             raw_actions = mu + std * eps
             log_prob = gaussian_log_prob(raw_actions, mu, std)
             return raw_actions, log_prob, tf.squeeze(state_value, axis=-1)
@@ -517,6 +530,24 @@ class Agent:
             rollout_reward,
         )
 
+    def _compute_and_apply_grads(self, tape, loss):
+        """Gradient step with optional loss scaling.
+
+        With mixed_float16 the trunk runs in float16, so gradients must be
+        computed from a scaled loss and unscaled before the update --
+        otherwise small grads underflow to zero. Plain-Adam path unchanged.
+        Logged losses always use the unscaled `loss`.
+        """
+        variables = self.model.trainable_variables
+        if self._loss_scaling:
+            grads = tape.gradient(
+                self.optimizer.scale_loss(loss), variables
+            )
+            grads = self.optimizer.get_unscaled_gradients(grads)
+        else:
+            grads = tape.gradient(loss, variables)
+        self.optimizer.apply_gradients(zip(grads, variables))
+
     def _train_step_discrete_impl(
         self,
         states: tf.Tensor,
@@ -564,8 +595,7 @@ class Agent:
                 tf.cast(tf.abs(ratio - 1.0) > self.clip_eps, tf.float32)
             )
 
-        grads = tape.gradient(loss, self.model.trainable_variables)
-        self.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
+        self._compute_and_apply_grads(tape, loss)
         return loss, policy_loss, value_loss, entropy, approx_kl, clipfrac
 
     def _train_step_continuous_impl(
@@ -611,8 +641,7 @@ class Agent:
                 tf.cast(tf.abs(ratio - 1.0) > self.clip_eps, tf.float32)
             )
 
-        grads = tape.gradient(loss, self.model.trainable_variables)
-        self.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
+        self._compute_and_apply_grads(tape, loss)
         return loss, policy_loss, value_loss, entropy, approx_kl, clipfrac
 
     def learn_from_episode(self):
@@ -786,7 +815,7 @@ def main(argv=None):
     TEST_MAX_STEPS = args.test_max_steps
     SEED = args.seed
 
-    device_str, gpu_available = configure_hardware(
+    device_str, gpu_available, use_mp = configure_hardware(
         device=args.device,
         mixed_precision=args.mixed_precision,
         threads=args.threads,
@@ -841,6 +870,17 @@ def main(argv=None):
     optimizer = tf.keras.optimizers.Adam(
         learning_rate=ALPHA, clipnorm=MAX_GRAD_NORM
     )
+    if use_mp:
+        # Custom GradientTape loop gets no automatic loss scaling from the
+        # mixed_float16 policy, so wrap explicitly: without this, small
+        # float16 gradients underflow to zero and training silently stalls.
+        try:
+            from keras.mixed_precision import LossScaleOptimizer
+
+            optimizer = LossScaleOptimizer(optimizer)
+            print("Loss scaling enabled (LossScaleOptimizer)")
+        except Exception as e:  # pragma: no cover
+            print(f"Could not enable loss scaling: {e}")
 
     # XLA pays off on NVIDIA GPUs (e.g. Colab T4/L4/A100) and is roughly
     # neutral on CPU, so auto-enable it whenever a GPU was detected.
